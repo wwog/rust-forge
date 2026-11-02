@@ -1,0 +1,466 @@
+{
+  "upgrade": {
+    "kind": "upgrade-panel",
+    "rows": [
+      {
+        "id": "dep:/tmp/rfdemo2/Cargo.toml:dependencies::regex:0",
+        "label": "regex",
+        "member": "rfdemo2",
+        "requirement": "1.10",
+        "locked": "1.10.2",
+        "latest": "1.13.1",
+        "classification": "safe",
+        "features": [],
+        "optional": false,
+        "advisories": [],
+        "registryUnavailable": false,
+        "isWorkspaceDependency": false,
+        "table": "dependencies"
+      },
+      {
+        "id": "dep:/tmp/rfdemo2/Cargo.toml:dependencies::serde:0",
+        "label": "serde",
+        "member": "rfdemo2",
+        "requirement": "1.0.190",
+        "locked": "1.0.229",
+        "latest": "1.0.229",
+        "classification": "not-applicable",
+        "reason": "no-update",
+        "features": [
+          "derive"
+        ],
+        "optional": false,
+        "advisories": [],
+        "registryUnavailable": false,
+        "isWorkspaceDependency": false,
+        "table": "dependencies"
+      },
+      {
+        "id": "dep:/tmp/rfdemo2/Cargo.toml:dev-dependencies::tempfile:0",
+        "label": "tempfile",
+        "member": "rfdemo2",
+        "requirement": "3",
+        "locked": "3.8.0",
+        "latest": "3.27.0",
+        "classification": "unknown",
+        "reason": "features-changed",
+        "features": [],
+        "optional": false,
+        "advisories": [],
+        "registryUnavailable": false,
+        "isWorkspaceDependency": false,
+        "table": "dev-dependencies"
+      },
+      {
+        "id": "dep:/tmp/rfdemo2/Cargo.toml:dependencies::time:0",
+        "label": "time",
+        "member": "rfdemo2",
+        "requirement": "0.3.36",
+        "locked": "0.3.36",
+        "latest": "0.3.55",
+        "classification": "safe",
+        "features": [],
+        "optional": false,
+        "advisories": [],
+        "registryUnavailable": false,
+        "isWorkspaceDependency": false,
+        "table": "dependencies"
+      }
+    ],
+    "registryDegraded": false,
+    "workspace": false
+  },
+  "install": {
+    "kind": "install-panel",
+    "workspace": false,
+    "members": [
+      {
+        "name": "rfdemo",
+        "manifestPath": "/tmp/rfdemo2/Cargo.toml"
+      }
+    ],
+    "defaultMember": "rfdemo",
+    "defaultTable": "dependencies"
+  },
+  "properties": {
+    "kind": "properties-panel",
+    "workspace": false,
+    "packageProperties": [
+      {
+        "key": "rust-version",
+        "label": "Minimum Rust version (MSRV)",
+        "description": "Lowest toolchain version this crate supports. Checked against the active toolchain.",
+        "type": "version",
+        "value": "1.75",
+        "inherited": false,
+        "location": "Cargo.toml [package]",
+        "placeholder": "1.75"
+      },
+      {
+        "key": "edition",
+        "label": "Edition",
+        "description": "Rust edition. Upgrading changes language semantics — review before switching.",
+        "type": "enum",
+        "value": "2021",
+        "inherited": false,
+        "location": "Cargo.toml [package]",
+        "values": [
+          "2015",
+          "2018",
+          "2021",
+          "2024"
+        ],
+        "risky": true
+      },
+      {
+        "key": "version",
+        "label": "Version",
+        "description": "Package version. Workspace mode may inherit from [workspace.package].",
+        "type": "string",
+        "value": "0.2.1",
+        "inherited": false,
+        "location": "Cargo.toml [package]",
+        "placeholder": "0.1.0"
+      },
+      {
+        "key": "name",
+        "label": "Name",
+        "description": "Crate name. Changing it affects imports and publish records.",
+        "type": "string",
+        "value": "rfdemo2",
+        "inherited": false,
+        "location": "Cargo.toml [package]",
+        "risky": true
+      },
+      {
+        "key": "description",
+        "label": "Description",
+        "description": "Short summary shown on crates.io.",
+        "type": "string",
+        "value": "Workspace demo with real dependencies",
+        "inherited": false,
+        "location": "Cargo.toml [package]"
+      },
+      {
+        "key": "license",
+        "label": "License",
+        "description": "SPDX license expression, e.g. MIT OR Apache-2.0.",
+        "type": "string",
+        "value": "MIT OR Apache-2.0",
+        "inherited": false,
+        "location": "Cargo.toml [package]",
+        "placeholder": "MIT OR Apache-2.0"
+      }
+    ],
+    "workspaceProperties": [],
+    "members": [
+      {
+        "name": "rfdemo",
+        "manifestPath": "/tmp/rfdemo2/Cargo.toml"
+      }
+    ],
+    "activeMember": "rfdemo"
+  },
+  "rustfmt": {
+    "kind": "rustfmt-panel",
+    "workspace": false,
+    "scope": "workspace",
+    "filePath": "/tmp/rfdemo2/rustfmt.toml",
+    "fileExists": false,
+    "values": {},
+    "options": [
+      {
+        "key": "max_width",
+        "label": "Maximum line width before rustfmt wraps.",
+        "description": "Maximum line width before rustfmt wraps.",
+        "type": "number",
+        "default": 100,
+        "stable": true,
+        "min": 60,
+        "max": 240,
+        "category": "layout"
+      },
+      {
+        "key": "edition",
+        "label": "Edition used when parsing source files.",
+        "description": "Edition used when parsing source files.",
+        "type": "enum",
+        "values": [
+          "2015",
+          "2018",
+          "2021",
+          "2024"
+        ],
+        "stable": true,
+        "category": "layout"
+      },
+      {
+        "key": "hard_tabs",
+        "label": "Use tab characters instead of spaces.",
+        "description": "Use tab characters instead of spaces.",
+        "type": "boolean",
+        "default": false,
+        "stable": true,
+        "category": "layout"
+      },
+      {
+        "key": "tab_spaces",
+        "label": "Spaces per indentation level.",
+        "description": "Spaces per indentation level.",
+        "type": "number",
+        "default": 4,
+        "stable": true,
+        "min": 1,
+        "max": 16,
+        "category": "layout"
+      },
+      {
+        "key": "newline_style",
+        "label": "Line ending style.",
+        "description": "Line ending style.",
+        "type": "enum",
+        "values": [
+          "Auto",
+          "Unix",
+          "Windows",
+          "Native"
+        ],
+        "stable": true,
+        "category": "layout"
+      },
+      {
+        "key": "use_small_heuristics",
+        "label": "How aggressively to keep things on one line.",
+        "description": "How aggressively to keep things on one line.",
+        "type": "enum",
+        "values": [
+          "Default",
+          "Off",
+          "Max"
+        ],
+        "stable": true,
+        "category": "heuristics"
+      },
+      {
+        "key": "fn_single_line",
+        "label": "Allow single-expression functions on one line.",
+        "description": "Allow single-expression functions on one line.",
+        "type": "boolean",
+        "default": false,
+        "stable": false,
+        "category": "unstable"
+      },
+      {
+        "key": "reorder_imports",
+        "label": "Sort and merge import statements.",
+        "description": "Sort and merge import statements.",
+        "type": "boolean",
+        "default": true,
+        "stable": true,
+        "category": "imports"
+      },
+      {
+        "key": "reorder_modules",
+        "label": "Sort module declarations.",
+        "description": "Sort module declarations.",
+        "type": "boolean",
+        "default": true,
+        "stable": true,
+        "category": "imports"
+      },
+      {
+        "key": "imports_granularity",
+        "label": "How imports are grouped: one per crate, module, or item.",
+        "description": "How imports are grouped: one per crate, module, or item.",
+        "type": "enum",
+        "values": [
+          "Preserve",
+          "Crate",
+          "Module",
+          "Item",
+          "One"
+        ],
+        "stable": false,
+        "category": "imports"
+      },
+      {
+        "key": "group_imports",
+        "label": "Group imports by standard library, external crates and local.",
+        "description": "Group imports by standard library, external crates and local.",
+        "type": "enum",
+        "values": [
+          "Preserve",
+          "StdExternalCrate",
+          "One"
+        ],
+        "stable": false,
+        "category": "imports"
+      },
+      {
+        "key": "format_code_in_doc_comments",
+        "label": "Format Rust code inside doc comments.",
+        "description": "Format Rust code inside doc comments.",
+        "type": "boolean",
+        "default": false,
+        "stable": false,
+        "category": "unstable"
+      },
+      {
+        "key": "unstable_features",
+        "label": "Enables unstable options (requires nightly rustfmt).",
+        "description": "Enables unstable options (requires nightly rustfmt).",
+        "type": "boolean",
+        "default": false,
+        "stable": false,
+        "category": "unstable"
+      }
+    ],
+    "memberScopeAvailable": false
+  },
+  "standardize": {
+    "kind": "standardize-panel",
+    "workspace": false,
+    "findings": [
+      {
+        "id": "fmt-missing",
+        "title": "Create a recommended rustfmt.toml",
+        "description": "No rustfmt.toml found; a conservative recommended config can be created.",
+        "fixable": true,
+        "diffs": [
+          {
+            "path": "rustfmt.toml",
+            "diff": "",
+            "newContent": "# rustfmt configuration — generated by Rust Forge\n# Conservative options only; none of these change program semantics.\n\n# Layout\nmax_width = 100\ntab_spaces = 4\nhard_tabs = false\nedition = \"2021\"\n\n# Line-breaking heuristics\nuse_small_heuristics = \"Default\"\n\n# Imports\nreorder_imports = true\n# Requires nightly rustfmt; stable rustfmt ignores this with a warning.\nimports_granularity = \"Crate\"\n"
+          }
+        ]
+      }
+    ]
+  },
+  "convert": {
+    "kind": "convert-panel",
+    "packageName": "rfdemo",
+    "targetDir": "/tmp/rfdemo2/crates/rfdemo",
+    "issues": [
+      {
+        "id": "lockfile",
+        "severity": "info",
+        "message": "Cargo.lock will be regenerated at the workspace root."
+      }
+    ],
+    "extractableFields": [
+      {
+        "key": "version",
+        "value": "0.1.0",
+        "defaultExtract": true,
+        "present": true
+      },
+      {
+        "key": "edition",
+        "value": "2021",
+        "defaultExtract": true,
+        "present": true
+      },
+      {
+        "key": "rust-version",
+        "value": "1.75",
+        "defaultExtract": true,
+        "present": true
+      },
+      {
+        "key": "license",
+        "value": "MIT",
+        "defaultExtract": true,
+        "present": true
+      },
+      {
+        "key": "description",
+        "value": "Rust Forge demo",
+        "defaultExtract": false,
+        "present": true
+      }
+    ],
+    "operations": [
+      {
+        "kind": "write",
+        "path": "Cargo.toml",
+        "diff": "Index: Cargo.toml\n===================================================================\n--- Cargo.toml\tbefore\n+++ Cargo.toml\tafter\n@@ -1,15 +1,14 @@\n-[package]\n-name = \"rfdemo2\"\n+[workspace]\n+members = [\"crates/*\"]\n+resolver = \"2\"\n+\n+[workspace.package]\n version = \"0.2.1\"\n edition = \"2021\"\n rust-version = \"1.75\"\n-description = \"Workspace demo with real dependencies\"\n-license = \"MIT OR Apache-2.0\"\n \n-[dependencies]\n-serde = { version = \"1.0.190\", features = [\"derive\"] }\n-time = \"0.3.36\"\n+[workspace.dependencies]\n regex = \"1.10\"\n-\n-[dev-dependencies]\n+serde = { version = \"1.0.190\", features = [\"derive\"] }\n tempfile = \"3\"\n+time = \"0.3.36\"\n"
+      },
+      {
+        "kind": "move",
+        "path": "Cargo.toml",
+        "to": "crates/rfdemo2/Cargo.toml"
+      },
+      {
+        "kind": "write",
+        "path": "crates/rfdemo2/Cargo.toml",
+        "diff": "===================================================================\n--- Cargo.toml\tbefore\n+++ crates/rfdemo2/Cargo.toml\tafter\n@@ -1,15 +1,15 @@\n [package]\n name = \"rfdemo2\"\n-version = \"0.2.1\"\n-edition = \"2021\"\n-rust-version = \"1.75\"\n+version.workspace = true\n+edition.workspace = true\n+rust-version.workspace = true\n description = \"Workspace demo with real dependencies\"\n license = \"MIT OR Apache-2.0\"\n \n [dependencies]\n-serde = { version = \"1.0.190\", features = [\"derive\"] }\n-time = \"0.3.36\"\n-regex = \"1.10\"\n+serde = { workspace = true }\n+time = { workspace = true }\n+regex = { workspace = true }\n \n [dev-dependencies]\n-tempfile = \"3\"\n+tempfile = { workspace = true }\n"
+      },
+      {
+        "kind": "move",
+        "path": "src",
+        "to": "crates/rfdemo2/src"
+      },
+      {
+        "kind": "create-dir",
+        "path": "crates"
+      },
+      {
+        "kind": "create-dir",
+        "path": "crates/rfdemo2"
+      }
+    ],
+    "promoted": [
+      {
+        "name": "serde",
+        "workspaceValue": "{ version = \"1.0.190\", features = [\"derive\"] }",
+        "memberValue": "{ workspace = true }",
+        "features": [
+          "derive"
+        ]
+      },
+      {
+        "name": "time",
+        "workspaceValue": "\"0.3.36\"",
+        "memberValue": "{ workspace = true }",
+        "features": []
+      },
+      {
+        "name": "regex",
+        "workspaceValue": "\"1.10\"",
+        "memberValue": "{ workspace = true }",
+        "features": []
+      },
+      {
+        "name": "tempfile",
+        "workspaceValue": "\"3\"",
+        "memberValue": "{ workspace = true }",
+        "features": []
+      }
+    ],
+    "kept": [],
+    "hardCodedReferences": [],
+    "readmeHandling": "keep",
+    "canApply": true
+  },
+  "rollback": {
+    "kind": "rollback-panel",
+    "snapshots": [
+      {
+        "id": "1",
+        "label": "Convert to workspace",
+        "createdAt": 1793589667602,
+        "files": 2,
+        "moves": [
+          {
+            "from": "Cargo.toml",
+            "to": "crates/rfdemo/Cargo.toml"
+          },
+          {
+            "from": "src",
+            "to": "crates/rfdemo/src"
+          }
+        ]
+      }
+    ]
+  }
+}

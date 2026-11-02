@@ -1,0 +1,297 @@
+/**
+ * Central project state.
+ *
+ * Owns the active ProjectModel plus derived data (metadata, dependency tree,
+ * toolchain state) and fires events so every view refreshes consistently.
+ */
+import * as path from 'node:path';
+import * as vscode from 'vscode';
+import type { CargoMetadata } from './core/cargo/types.js';
+import { buildModel, discoverProject, parseManifestFile, type ProjectModel } from './core/cargo/project.js';
+import { readLockfile, type LockfileInfo } from './core/cargo/lockfile.js';
+import { readDependencies, readWorkspaceDependencies, type DependencyDeclaration } from './core/cargo/manifestDeps.js';
+import type { CrateDetail } from './core/deps/registry.js';
+import { buildDependencyTree, type DependencyTree } from './core/deps/tree.js';
+import { AuditService, type AuditResult } from './core/audit.js';
+import type { ToolchainState } from './core/toolchain.js';
+import type { Services } from './services.js';
+import type { PropertiesModel } from './core/properties.js';
+import { readProperties } from './core/properties.js';
+
+export interface ProjectSnapshot {
+  model: ProjectModel;
+  metadata?: CargoMetadata;
+  depTree: DependencyTree;
+  toolchain: ToolchainState;
+  audit: AuditResult;
+  properties: PropertiesModel;
+  errors: string[];
+}
+
+export type LoadPhase = 'idle' | 'loading' | 'ready' | 'error';
+
+export class ProjectController implements vscode.Disposable {
+  private model: ProjectModel | undefined;
+  private metadata: CargoMetadata | undefined;
+  private depTree: DependencyTree | undefined;
+  private toolchainState: ToolchainState | undefined;
+  private auditResult: AuditResult | undefined;
+  private propertiesModel: PropertiesModel | undefined;
+  private lastErrors: string[] = [];
+  private loadPhase: LoadPhase = 'idle';
+  private loadPromise: Promise<void> | undefined;
+
+  private readonly extraDisposables: vscode.Disposable[] = [];
+
+  private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
+  readonly onDidChange = this.onDidChangeEmitter.event;
+
+  private readonly onDidChangeStateEmitter = new vscode.EventEmitter<LoadPhase>();
+  readonly onDidChangeState = this.onDidChangeStateEmitter.event;
+
+  constructor(private readonly services: Services, private readonly context: vscode.ExtensionContext) {}
+
+  get phase(): LoadPhase {
+    return this.loadPhase;
+  }
+
+  get project(): ProjectModel | undefined {
+    return this.model;
+  }
+
+  get snapshot(): ProjectSnapshot | undefined {
+    if (!this.model || !this.depTree || !this.toolchainState || !this.auditResult || !this.propertiesModel) return undefined;
+    return {
+      model: this.model,
+      metadata: this.metadata,
+      depTree: this.depTree,
+      toolchain: this.toolchainState,
+      audit: this.auditResult,
+      properties: this.propertiesModel,
+      errors: this.lastErrors,
+    };
+  }
+
+  get root(): string | undefined {
+    return this.model?.root;
+  }
+
+  /** Dependency node lookup by tree id, used by the upgrade panel. */
+  findDependencyNode(id: string): import('./core/deps/tree.js').DependencyNode | undefined {
+    const root = this.depTree?.root;
+    if (!root) return undefined;
+    const stack = [root];
+    while (stack.length) {
+      const node = stack.pop()!;
+      if (node.id === id) return node;
+      for (const child of node.children ?? []) stack.push(child);
+    }
+    return undefined;
+  }
+
+  /** Root folder of the first workspace, used before a project is detected. */
+  get workspaceFolder(): vscode.WorkspaceFolder | undefined {
+    return vscode.workspace.workspaceFolders?.[0];
+  }
+
+  async initialize(): Promise<void> {
+    const folder = this.workspaceFolder;
+    if (!folder) {
+      this.setEmpty();
+      return;
+    }
+    const discovered = await discoverProject(folder.uri.fsPath, { respectMembership: false });
+    if (!discovered.model) {
+      this.setEmpty();
+      return;
+    }
+    await this.load(discovered.model.root);
+  }
+
+  /** Load (or reload) a project rooted at `dir`. */
+  async load(dir: string): Promise<void> {
+    this.loadPhase = 'loading';
+    this.onDidChangeStateEmitter.fire('loading');
+    const errors: string[] = [];
+
+    const built = await buildModel(dir);
+    if (!built.model) {
+      this.setEmpty(built.error);
+      return;
+    }
+    this.model = built.model;
+
+    const metadataResult = await this.services.cargo.metadata(dir, { noDeps: true });
+    if (metadataResult.ok) {
+      this.metadata = metadataResult.metadata;
+    } else {
+      this.metadata = undefined;
+      errors.push(metadataResult.error === 'cargo-missing' ? 'cargo was not found on PATH' : `cargo metadata failed: ${truncate(metadataResult.error ?? '')}`);
+    }
+
+    const lockfile = await readLockfile(dir);
+    const declarations = await this.loadDeclarations(this.model);
+
+    const registryData = await this.loadRegistryData(declarations);
+    const audit = this.services.settings.auditEnabled
+      ? await this.services.audit.run(dir, false)
+      : { source: 'unavailable' as const, advisories: [], byPackage: new Map(), fetchedAt: Date.now(), error: 'disabled' };
+
+    const model = this.model;
+    const workspaceDeps = model.kind === 'workspace' ? await readWorkspaceDependencies(model.root) : [];
+    const tree = buildDependencyTree({
+      model,
+      metadata: this.metadata,
+      declarations,
+      workspaceDependencies: workspaceDeps.map((d) => ({
+        key: d.name,
+        packageName: d.name,
+        table: 'dependencies' as const,
+        tablePath: 'workspace.dependencies',
+        version: d.version,
+        kind: d.kind === 'registry' ? 'registry' : d.kind === 'path' ? 'path' : d.kind === 'git' ? 'git' : 'unknown',
+        path: d.path,
+        git: d.git,
+        features: d.features,
+        defaultFeatures: d.defaultFeatures,
+        rawValue: d.rawValue,
+        manifestPath: path.join(model.root, 'Cargo.toml'),
+        line: d.line,
+      })),
+      lockfile,
+      registryData,
+      registryDegraded: this.services.registry.degraded,
+      advisories: audit.byPackage,
+    });
+
+    this.depTree = tree;
+    this.auditResult = audit;
+    this.toolchainState = await this.services.toolchain.detect(this.model.root, this.metadata?.packages.find((p) => p.name === this.primaryPackageName())?.rust_version ?? undefined);
+    this.propertiesModel = await readProperties(this.model);
+    this.lastErrors = errors;
+    this.loadPhase = 'ready';
+    await this.updateContextKeys();
+    this.onDidChangeStateEmitter.fire('ready');
+    this.onDidChangeEmitter.fire();
+  }
+
+  private async loadDeclarations(model: ProjectModel): Promise<{ member: string; manifestPath: string; deps: DependencyDeclaration[] }[]> {
+    const result: { member: string; manifestPath: string; deps: DependencyDeclaration[] }[] = [];
+    for (const member of model.members) {
+      result.push({
+        member: member.name,
+        manifestPath: member.manifestPath,
+        deps: await readDependencies(member.manifestPath),
+      });
+    }
+    return result;
+  }
+
+  private async loadRegistryData(
+    declarations: { member: string; manifestPath: string; deps: DependencyDeclaration[] }[],
+  ): Promise<Map<string, CrateDetail | undefined>> {
+    const map = new Map<string, CrateDetail | undefined>();
+    if (this.services.settings.offline) return map;
+
+    const names = new Set<string>();
+    for (const entry of declarations) {
+      for (const dep of entry.deps) {
+        if (dep.kind === 'registry' || dep.kind === 'workspace') names.add(dep.packageName);
+      }
+    }
+
+    const entries = [...names];
+    const concurrency = 6;
+    let index = 0;
+    const workers = Array.from({ length: Math.min(concurrency, entries.length) }, async () => {
+      while (index < entries.length) {
+        const name = entries[index++];
+        const detail = await this.services.registry.crate(name);
+        map.set(name, detail);
+      }
+    });
+    await Promise.all(workers);
+    return map;
+  }
+
+  primaryPackageName(): string {
+    if (!this.model) return '';
+    return this.model.rootPackage?.name ?? this.model.members[0]?.name ?? '';
+  }
+
+  private setEmpty(error?: string): void {
+    this.model = undefined;
+    this.metadata = undefined;
+    this.depTree = undefined;
+    this.toolchainState = undefined;
+    this.auditResult = undefined;
+    this.propertiesModel = undefined;
+    this.lastErrors = error && error !== 'no-manifest' ? [error] : [];
+    this.loadPhase = 'idle';
+    void this.updateContextKeys();
+    this.onDidChangeStateEmitter.fire('idle');
+    this.onDidChangeEmitter.fire();
+  }
+
+  /** Clear project state (used when no folder is open). */
+  reset(): void {
+    this.setEmpty();
+  }
+
+  async refresh(): Promise<void> {
+    if (!this.model) {
+      await this.initialize();
+      return;
+    }
+    if (this.loadPromise) return this.loadPromise;
+    this.loadPromise = this.load(this.model.root).finally(() => {
+      this.loadPromise = undefined;
+    });
+    return this.loadPromise;
+  }
+
+  /** Force a refetch of security advisories, bypassing the cache. */
+  async refreshAudit(): Promise<void> {
+    if (!this.model) return;
+    const result = await this.services.audit.run(this.model.root, true);
+    this.auditResult = result;
+    if (this.depTree) {
+      // Re-index advisories on existing nodes without rebuilding the tree.
+      const applyNode = (node: import('./core/deps/tree.js').DependencyNode) => {
+        node.advisories = node.declaration ? result.byPackage.get(node.declaration.packageName) ?? [] : [];
+        for (const child of node.children ?? []) applyNode(child);
+      };
+      applyNode(this.depTree.root);
+    }
+    this.onDidChangeEmitter.fire();
+  }
+
+  private async updateContextKeys(): Promise<void> {
+    const hasProject = !!this.model;
+    await vscode.commands.executeCommand('setContext', 'rustForge.hasProject', hasProject);
+    await vscode.commands.executeCommand('setContext', 'rustForge.isWorkspace', this.model?.kind === 'workspace');
+    await vscode.commands.executeCommand('setContext', 'rustForge.singlePackage', this.model?.kind === 'package');
+  }
+
+  /** Track a disposable tied to this controller's lifetime. */
+  registerDisposable(disposable: vscode.Disposable): void {
+    this.extraDisposables.push(disposable);
+  }
+
+  /** Refresh context keys after a snapshot is created or rolled back. */
+  async syncContextKeys(): Promise<void> {
+    await this.updateContextKeys();
+  }
+
+  dispose(): void {
+    for (const disposable of this.extraDisposables) disposable.dispose();
+    this.onDidChangeEmitter.dispose();
+    this.onDidChangeStateEmitter.dispose();
+  }
+}
+
+function truncate(value: string, limit = 400): string {
+  return value.length > limit ? `${value.slice(0, limit)}…` : value;
+}
+
+export { parseManifestFile, path };

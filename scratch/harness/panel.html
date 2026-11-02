@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" id="vscode-codicon-stylesheet" href="./codicon.css">
+<style>
+:root{--vscode-font-family:-apple-system,BlinkMacSystemFont,sans-serif;--vscode-font-size:13px;--vscode-foreground:#ccc;--vscode-editor-background:#1e1e1e;--vscode-descriptionForeground:#9d9d9d;--vscode-panel-border:#3c3c3c;--vscode-focusBorder:#007fd4;--vscode-list-hoverBackground:#2a2d2e;--vscode-list-activeSelectionBackground:#04395e;--vscode-list-activeSelectionForeground:#fff;--vscode-list-inactiveSelectionBackground:#37373d;--vscode-button-background:#0e639c;--vscode-button-foreground:#fff;--vscode-button-secondaryBackground:#3a3d41;--vscode-button-secondaryForeground:#fff;--vscode-charts-green:#89d185;--vscode-charts-orange:#d18616;--vscode-charts-yellow:#cca700;--vscode-charts-blue:#3794ff;--vscode-errorForeground:#f48771;--vscode-textLink-foreground:#3794ff;--vscode-textLink-activeForeground:#4daafc;--vscode-inputValidation-errorBorder:#be1100;--vscode-inputValidation-infoBackground:#063b49;--vscode-inputValidation-infoBorder:#007acc;--vscode-inputValidation-warningBackground:#352a05;--vscode-inputValidation-warningBorder:#b89500;--vscode-inputValidation-errorBackground:#5a1d1d;--vscode-editorWidget-background:#252526;--vscode-widget-border:#454545;--vscode-badge-background:#4d4d4d;--vscode-badge-foreground:#fff;--vscode-editor-font-family:Menlo,monospace;--vscode-textCodeBlock-background:#2d2d2d;--vscode-notifications-background:#252526;--vscode-notifications-foreground:#ccc;--vscode-focusBorder:#007fd4;--vscode-editor-foreground:#d4d4d4;--vscode-scrollbarSlider-background:#79797966;}
+</style>
+<link rel="stylesheet" href="./webview.css?v=3">
+</head><body><div id="root" class="root"></div>
+<script>
+window.rustForge={post:()=>{}};
+window.RF_ZH = new URLSearchParams(location.search).get('lang') === 'zh';
+</script>
+<script>
+fetch('./zh.json').then(r=>r.json()).then(d=>{ window.rustForge.i18n = window.RF_ZH ? d : {}; window.__dictReady = true; });
+</script>
+<script>
+(function load(){
+  if (window.RF_ZH && !window.__dictReady) { setTimeout(load, 60); return; }
+  if (window.__loaded) return;
+  window.__loaded = true;
+  const s=document.createElement("script");
+  s.src="./panels.js?v=" + Date.now();
+  document.body.appendChild(s);
+})();
+</script>
+</body></html>

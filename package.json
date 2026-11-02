@@ -1,0 +1,524 @@
+{
+  "name": "rust-forge",
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
+  "version": "0.1.0",
+  "publisher": "rust-forge",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "rust",
+    "cargo",
+    "workspace",
+    "rustfmt",
+    "clippy"
+  ],
+  "main": "./dist/extension.js",
+  "l10n": "./l10n",
+  "capabilities": {
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "Rust Forge inspects and writes Cargo manifests on disk."
+    },
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Rust Forge runs cargo, rustup and git commands in the workspace."
+    }
+  },
+  "activationEvents": [
+    "workspaceContains:Cargo.toml",
+    "onView:rustForge.project",
+    "onView:rustForge.dependencies",
+    "onView:rustForge.toolchain",
+    "onView:rustForge.settings"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "rustForge",
+          "title": "%container.title%",
+          "icon": "media/activity-bar.svg"
+        }
+      ]
+    },
+    "views": {
+      "rustForge": [
+        {
+          "id": "rustForge.project",
+          "name": "%view.project%"
+        },
+        {
+          "id": "rustForge.dependencies",
+          "name": "%view.dependencies%",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "rustForge.toolchain",
+          "name": "%view.toolchain%",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "rustForge.settings",
+          "name": "%view.settings%",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "rustForge.project",
+        "when": "!rustForge.hasProject",
+        "contents": "%welcome.project%"
+      },
+      {
+        "view": "rustForge.dependencies",
+        "when": "!rustForge.hasProject",
+        "contents": "%welcome.dependencies%"
+      },
+      {
+        "view": "rustForge.toolchain",
+        "when": "!rustForge.hasProject",
+        "contents": "%welcome.toolchain%"
+      }
+    ],
+    "commands": [
+      {
+        "command": "rustForge.createProject",
+        "title": "%command.createProject%",
+        "category": "Rust Forge",
+        "icon": "$(add)"
+      },
+      {
+        "command": "rustForge.openProject",
+        "title": "%command.openProject%",
+        "category": "Rust Forge",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "rustForge.refresh",
+        "title": "%command.refresh%",
+        "category": "Rust Forge",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rustForge.openManifest",
+        "title": "%command.openManifest%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.files.newFile",
+        "title": "%command.files.newFile%",
+        "category": "Rust Forge",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "rustForge.files.newFolder",
+        "title": "%command.files.newFolder%",
+        "category": "Rust Forge",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "rustForge.files.refresh",
+        "title": "%command.files.refresh%",
+        "category": "Rust Forge",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rustForge.files.rename",
+        "title": "%command.files.rename%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.files.delete",
+        "title": "%command.files.delete%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.files.copyPath",
+        "title": "%command.files.copyPath%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.files.copyRelativePath",
+        "title": "%command.files.copyRelativePath%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.files.revealInOS",
+        "title": "%command.files.revealInOS%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.files.openToSide",
+        "title": "%command.files.openToSide%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.addMember",
+        "title": "%command.addMember%",
+        "category": "Rust Forge",
+        "icon": "$(add)"
+      },
+      {
+        "command": "rustForge.removeMember",
+        "title": "%command.removeMember%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.installDependency",
+        "title": "%command.installDependency%",
+        "category": "Rust Forge",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "rustForge.upgradeDependencies",
+        "title": "%command.upgradeDependencies%",
+        "category": "Rust Forge",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "rustForge.upgradeDependency",
+        "title": "%command.upgradeDependency%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.openCrateDocs",
+        "title": "%command.openCrateDocs%",
+        "category": "Rust Forge",
+        "icon": "$(book)"
+      },
+      {
+        "command": "rustForge.removeDependency",
+        "title": "%command.removeDependency%",
+        "category": "Rust Forge",
+        "icon": "media/trash-red.svg"
+      },
+      {
+        "command": "rustForge.addWorkspaceDependencyToMember",
+        "title": "%command.addWorkspaceDependencyToMember%",
+        "category": "Rust Forge",
+        "icon": "$(add)"
+      },
+      {
+        "command": "rustForge.editProperties",
+        "title": "%command.editProperties%",
+        "category": "Rust Forge",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "rustForge.editRustfmt",
+        "title": "%command.editRustfmt%",
+        "category": "Rust Forge",
+        "icon": "$(symbol-color)"
+      },
+      {
+        "command": "rustForge.standardize",
+        "title": "%command.standardize%",
+        "category": "Rust Forge",
+        "icon": "$(wand)"
+      },
+      {
+        "command": "rustForge.convertToWorkspace",
+        "title": "%command.convertToWorkspace%",
+        "category": "Rust Forge",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "rustForge.updateToolchain",
+        "title": "%command.updateToolchain%",
+        "category": "Rust Forge",
+        "icon": "$(arrow-circle-up)"
+      },
+      {
+        "command": "rustForge.installToolchain",
+        "title": "%command.installToolchain%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.installRustup",
+        "title": "%command.installRustup%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.refreshAudit",
+        "title": "%command.refreshAudit%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.installCargoAudit",
+        "title": "%command.installCargoAudit%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.openDependencyManifest",
+        "title": "%command.openDependencyManifest%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.runClippy",
+        "title": "%command.runClippy%",
+        "category": "Rust Forge"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "rustForge.createProject",
+          "when": "view == rustForge.project && !rustForge.hasProject",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rustForge.addMember",
+          "when": "view == rustForge.project && rustForge.isWorkspace",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rustForge.editProperties",
+          "when": "view == rustForge.project && rustForge.hasProject",
+          "group": "navigation@2"
+        },
+        {
+          "command": "rustForge.editRustfmt",
+          "when": "view == rustForge.project && rustForge.hasProject",
+          "group": "navigation@3"
+        },
+        {
+          "command": "rustForge.standardize",
+          "when": "view == rustForge.project && rustForge.hasProject",
+          "group": "navigation@4"
+        },
+        {
+          "command": "rustForge.convertToWorkspace",
+          "when": "view == rustForge.project && rustForge.singlePackage",
+          "group": "navigation@5"
+        },
+        {
+          "command": "rustForge.installDependency",
+          "when": "view == rustForge.dependencies && rustForge.hasProject",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rustForge.upgradeDependencies",
+          "when": "view == rustForge.dependencies && rustForge.hasProject",
+          "group": "navigation@2"
+        },
+        {
+          "command": "rustForge.refreshAudit",
+          "when": "view == rustForge.dependencies && rustForge.hasProject",
+          "group": "navigation@3"
+        },
+        {
+          "command": "rustForge.refresh",
+          "when": "view == rustForge.dependencies || view == rustForge.toolchain || view == rustForge.project",
+          "group": "navigation@9"
+        },
+        {
+          "command": "rustForge.updateToolchain",
+          "when": "view == rustForge.toolchain && rustForge.hasProject",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rustForge.installToolchain",
+          "when": "view == rustForge.toolchain && rustForge.hasProject",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "rustForge.files.newFile",
+          "when": "view == rustForge.project && viewItem =~ /^(directory|rootDirectory|member|workspaceRoot|rootPackage)$/",
+          "group": "inline@1"
+        },
+        {
+          "command": "rustForge.files.newFolder",
+          "when": "view == rustForge.project && viewItem =~ /^(directory|rootDirectory|member|workspaceRoot|rootPackage)$/",
+          "group": "inline@2"
+        },
+        {
+          "command": "rustForge.files.openToSide",
+          "when": "view == rustForge.project && viewItem == file",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rustForge.files.revealInOS",
+          "when": "view == rustForge.project && viewItem =~ /^(file|directory|rootDirectory|member|workspaceRoot|rootPackage)$/",
+          "group": "navigation@2"
+        },
+        {
+          "command": "rustForge.files.rename",
+          "when": "view == rustForge.project && viewItem =~ /^(file|directory)$/",
+          "group": "1_modification@1"
+        },
+        {
+          "command": "rustForge.files.delete",
+          "when": "view == rustForge.project && viewItem =~ /^(file|directory)$/",
+          "group": "1_modification@2"
+        },
+        {
+          "command": "rustForge.files.copyPath",
+          "when": "view == rustForge.project && viewItem =~ /^(file|directory|rootDirectory|member|workspaceRoot|rootPackage)$/",
+          "group": "9_cutcopypaste@1"
+        },
+        {
+          "command": "rustForge.files.copyRelativePath",
+          "when": "view == rustForge.project && viewItem =~ /^(file|directory|rootDirectory|member|workspaceRoot|rootPackage)$/",
+          "group": "9_cutcopypaste@2"
+        },
+        {
+          "command": "rustForge.removeMember",
+          "when": "view == rustForge.project && viewItem == member",
+          "group": "1_modification@1"
+        },
+        {
+          "command": "rustForge.upgradeDependency",
+          "when": "view == rustForge.dependencies && viewItem =~ /upgradable/",
+          "group": "inline@1"
+        },
+        {
+          "command": "rustForge.openCrateDocs",
+          "when": "view == rustForge.dependencies && viewItem =~ /documentable/",
+          "group": "inline@2"
+        },
+        {
+          "command": "rustForge.removeDependency",
+          "when": "view == rustForge.dependencies && viewItem =~ /^dependency/",
+          "group": "inline@3"
+        },
+        {
+          "command": "rustForge.addWorkspaceDependencyToMember",
+          "when": "view == rustForge.dependencies && viewItem =~ /workspaceRootDependency/",
+          "group": "1_modification@1"
+        },
+        {
+          "command": "rustForge.installDependency",
+          "when": "view == rustForge.dependencies && viewItem == memberDeps",
+          "group": "inline@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "rustForge.files.rename",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.files.delete",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.files.copyPath",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.files.copyRelativePath",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.files.revealInOS",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.files.openToSide",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.upgradeDependency",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.openCrateDocs",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.removeDependency",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.addWorkspaceDependencyToMember",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.openDependencyManifest",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Rust Forge",
+      "properties": {
+        "rustForge.cargoPath": {
+          "type": "string",
+          "default": "",
+          "description": "%config.cargoPath%"
+        },
+        "rustForge.rustupPath": {
+          "type": "string",
+          "default": "",
+          "description": "%config.rustupPath%"
+        },
+        "rustForge.offline": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.offline%"
+        },
+        "rustForge.auditEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.auditEnabled%"
+        },
+        "rustForge.auditCacheHours": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "description": "%config.auditCacheHours%"
+        },
+        "rustForge.networkTimeoutMs": {
+          "type": "number",
+          "default": 8000,
+          "minimum": 1000,
+          "description": "%config.networkTimeout%"
+        },
+        "rustForge.crateDocsOpenMode": {
+          "type": "string",
+          "enum": [
+            "browser",
+            "webview"
+          ],
+          "default": "browser",
+          "description": "%config.crateDocsOpenMode%"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "test": "tsx --test src/test/*.test.ts",
+    "package": "npm run check && npm run build && vsce package --no-dependencies --allow-missing-repository --no-rewrite-relative-links",
+    "vscode:prepublish": "npm run build"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.2",
+    "@types/node": "^26.6.6",
+    "@types/semver": "^7.8.0",
+    "@types/vscode": "^1.100.0",
+    "@vscode-elements/elements": "^2.5.1",
+    "@vscode/codicons": "^0.0.46-24",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.1.0",
+    "diff": "^9.0.0",
+    "esbuild": "^0.28.2",
+    "semver": "^7.8.5",
+    "smol-toml": "^1.9.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

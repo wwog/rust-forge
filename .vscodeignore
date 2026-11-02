@@ -1,0 +1,13 @@
+.vscode/**
+.vscode-test/**
+src/**
+scratch/**
+node_modules/**
+dist/test/**
+esbuild.mjs
+esbuild.test.mjs
+tsconfig.json
+package-lock.json
+**/*.map
+**/*.test.ts
+.gitignore
