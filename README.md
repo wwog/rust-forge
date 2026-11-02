@@ -74,3 +74,5 @@ Press <kbd>F5</kbd> to launch an Extension Development Host.
 - Transitive dependencies are intentionally not listed.
 - Unstable rustfmt options are written only when you opt in; stable rustfmt ignores them with a warning.
 - `cargo update --precise` is intentionally not used; upgrades rewrite requirements and let Cargo resolve.
+
+https://marketplace.visualstudio.com/manage/publishers/rust-forge
