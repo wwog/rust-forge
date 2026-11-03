@@ -60,15 +60,17 @@ export function activate(context: vscode.ExtensionContext): void {
   const projectTree = new ProjectTreeProvider(controller);
   const dependencyTree = new DependencyTreeProvider(controller);
   const toolchainTree = new ToolchainTreeProvider(controller);
+  const projectView = vscode.window.createTreeView('rustForge.project', {
+    treeDataProvider: projectTree,
+    showCollapseAll: true,
+    dragAndDropController: projectTree,
+  });
 
   context.subscriptions.push(
     services,
     controller,
     projectTree,
-    vscode.window.createTreeView('rustForge.project', {
-      treeDataProvider: projectTree,
-      showCollapseAll: true,
-    }),
+    projectView,
     vscode.window.createTreeView('rustForge.dependencies', {
       treeDataProvider: dependencyTree,
       showCollapseAll: true,
@@ -100,6 +102,8 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(vscode.commands.registerCommand(id, handler as (...args: unknown[]) => unknown));
 
   register('rustForge.createProject', () => createProjectWizard(controller, services));
+  register('rustForge.createSinglePackage', () => createProjectWizard(controller, services, 'package'));
+  register('rustForge.createWorkspace', () => createProjectWizard(controller, services, 'workspace'));
   register('rustForge.openProject', () => openProjectWizard(controller));
   register('rustForge.refresh', async () => {
     await controller.refresh();
@@ -112,7 +116,9 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   register('rustForge.files.newFile', (item?: unknown) => newFileCommand(projectTree, item));
   register('rustForge.files.newFolder', (item?: unknown) => newFolderCommand(projectTree, item));
-  register('rustForge.files.rename', (item?: unknown) => renameFileCommand(projectTree, item));
+  register('rustForge.files.rename', (item?: unknown) =>
+    renameFileCommand(projectTree, item ?? projectView.selection[0]),
+  );
   register('rustForge.files.delete', (item?: unknown) => deleteFileCommand(projectTree, item));
   register('rustForge.files.copyPath', (item?: unknown) => copyPathCommand(projectTree, item));
   register('rustForge.files.copyRelativePath', (item?: unknown) => copyRelativePathCommand(projectTree, item));
@@ -245,15 +251,25 @@ export function activate(context: vscode.ExtensionContext): void {
   const scheduleConfigRefresh = (uri: vscode.Uri) => {
     if (uri.scheme !== 'file') return;
     if (!isProjectConfigFile(path.basename(uri.fsPath))) return;
-    const root = controller.project?.root;
+    const folder = controller.workspaceFolder?.uri.fsPath;
+    const projectRoot = controller.project?.root;
+    const root = projectRoot ?? folder;
     if (!root || !isInside(root, uri.fsPath)) return;
+    // Without a project only a root Cargo.toml can turn the folder into one;
+    // member manifests inside a non-Rust folder must not trigger a reload.
+    if (!projectRoot && (path.basename(uri.fsPath) !== 'Cargo.toml' || path.dirname(uri.fsPath) !== folder)) {
+      return;
+    }
     cancelConfigRefresh();
     configRefreshTimer = setTimeout(() => {
       configRefreshTimer = undefined;
       // Re-check: the project may have changed or closed while debouncing.
-      const currentRoot = controller.project?.root;
+      const currentProjectRoot = controller.project?.root;
+      const currentFolder = controller.workspaceFolder?.uri.fsPath;
+      const currentRoot = currentProjectRoot ?? currentFolder;
       if (!currentRoot || !isInside(currentRoot, uri.fsPath)) return;
-      void controller.refresh().catch((error) => {
+      const reload = currentProjectRoot ? controller.refresh() : controller.initialize();
+      void reload.catch((error) => {
         log(`Rust Forge: project refresh after external change failed: ${error instanceof Error ? error.message : String(error)}`);
       });
     }, CONFIG_REFRESH_DELAY_MS);

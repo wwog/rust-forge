@@ -23,7 +23,11 @@ import {
   type FileEntry,
 } from './fileTree.js';
 import { isPathExcluded, sortEntries, workspaceContainers } from '../core/files.js';
+import { isProjectConfigFile } from '../core/watch.js';
+import { moveEntriesToDirectory } from '../commands/files.js';
 import { t } from '../core/i18n.js';
+
+const PROJECT_TREE_MIME = 'application/vnd.code.tree.rustforge.project';
 
 type ProjectNodeKind = 'root' | 'member' | 'directory' | 'file' | 'info' | 'action' | 'message';
 
@@ -42,7 +46,13 @@ interface ProjectNode {
   id?: string;
 }
 
-export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> implements vscode.Disposable, FileTreeHost {
+export class ProjectTreeProvider
+  extends SnapshotTreeProvider<ProjectNode>
+  implements vscode.Disposable, FileTreeHost, vscode.TreeDragAndDropController<ProjectNode>
+{
+  readonly dropMimeTypes = [PROJECT_TREE_MIME, 'text/uri-list', 'files'];
+  readonly dragMimeTypes = [PROJECT_TREE_MIME, 'text/uri-list'];
+
   private readonly disposables: vscode.Disposable[] = [];
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -71,6 +81,94 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
     const project = this.controller.project;
     if (project) return vscode.Uri.file(project.root);
     return vscode.workspace.workspaceFolders?.[0]?.uri;
+  }
+
+  // ----------------------------------------------------------- drag & drop
+  //
+  // Only files and plain directories can be dragged. Members (`crate` nodes)
+  // and the project root are drop targets, never drag sources.
+
+  handleDrag(source: readonly ProjectNode[], dataTransfer: vscode.DataTransfer): void {
+    const uris = source
+      .filter((node) => (node.kind === 'file' || node.kind === 'directory') && !!node.resourceUri)
+      .map((node) => node.resourceUri!);
+    if (!uris.length) return;
+    const values = uris.map((uri) => uri.toString());
+    // Custom data survives an internal drop; `text/uri-list` keeps the drag
+    // usable by other trees and editors.
+    dataTransfer.set(PROJECT_TREE_MIME, new vscode.DataTransferItem(values));
+    dataTransfer.set('text/uri-list', new vscode.DataTransferItem(values.join('\r\n')));
+  }
+
+  async handleDrop(
+    target: ProjectNode | undefined,
+    dataTransfer: vscode.DataTransfer,
+    token: vscode.CancellationToken,
+  ): Promise<void> {
+    if (!this.controller.project) return;
+    const directory = this.dropDirectory(target);
+    if (!directory) return;
+    const sources = (await this.dropSources(dataTransfer)).filter((uri) => !this.isMemberRoot(uri));
+    if (token.isCancellationRequested || !sources.length) return;
+
+    const changed = await moveEntriesToDirectory(this, sources, directory);
+    if (!changed) return;
+    this.refresh();
+    if (sources.some((uri) => isProjectConfigFile(path.basename(uri.fsPath)))) {
+      await this.controller.refresh();
+    }
+  }
+
+  /** Directory a drop lands in; dropping on a file targets its parent folder. */
+  private dropDirectory(target: ProjectNode | undefined): vscode.Uri | undefined {
+    if (!target) return this.rootUri;
+    if (!target.resourceUri) return undefined;
+    switch (target.kind) {
+      case 'root':
+      case 'member':
+      case 'directory':
+        return target.resourceUri;
+      case 'file':
+        return vscode.Uri.joinPath(target.resourceUri, '..');
+      default:
+        return undefined;
+    }
+  }
+
+  /** Crate roots are never drag sources, even when dragged in from the Explorer. */
+  private isMemberRoot(uri: vscode.Uri): boolean {
+    const project = this.controller.project;
+    if (!project || uri.scheme !== 'file') return false;
+    return project.members.some((member) => path.resolve(member.dir) === path.resolve(uri.fsPath));
+  }
+
+  private async dropSources(dataTransfer: vscode.DataTransfer): Promise<vscode.Uri[]> {
+    const uris = new Map<string, vscode.Uri>();
+    const add = (uri: vscode.Uri) => {
+      if (uri.scheme === 'file') uris.set(uri.toString(), uri);
+    };
+
+    const internal = dataTransfer.get(PROJECT_TREE_MIME)?.value;
+    if (Array.isArray(internal)) {
+      for (const value of internal) {
+        if (typeof value === 'string') add(vscode.Uri.parse(value));
+      }
+    }
+    if (!uris.size) {
+      const list = await dataTransfer.get('text/uri-list')?.asString();
+      if (list) {
+        for (const line of list.split(/\r?\n/)) {
+          const value = line.trim();
+          if (value && !value.startsWith('#')) add(vscode.Uri.parse(value));
+        }
+      }
+    }
+    for (const [mime, item] of dataTransfer) {
+      if (mime !== 'files') continue;
+      const file = item.asFile();
+      if (file?.uri) add(file.uri);
+    }
+    return [...uris.values()];
   }
 
   getTreeItem(node: ProjectNode): vscode.TreeItem {
@@ -130,6 +228,13 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
 
   private async buildTopLevel(): Promise<ProjectNode[]> {
     const project = this.controller.project;
+    // Without a root Cargo.toml this is not a Rust project: leave the view
+    // empty so the folder-state welcome (initialize / create / open) shows
+    // instead of an ordinary file listing.
+    if (!project) {
+      if (this.controller.phase !== 'error') return [];
+      return [this.statusNode('error', t('Could not load project data.'), this.controller.errors.join('\n') || undefined)];
+    }
     const root = this.rootUri;
     if (!root) return [];
 
@@ -143,7 +248,7 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
     }
     nodes.push(await this.rootNode(root, project));
 
-    if (project?.emptyWorkspaceShell) {
+    if (project.emptyWorkspaceShell) {
       nodes.push({
         kind: 'info',
         label: t('Empty [workspace] table detected'),

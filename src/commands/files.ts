@@ -182,6 +182,92 @@ export function refreshFilesCommand(provider: FileTreeHost): void {
   provider.refresh();
 }
 
+/**
+ * Drop entries into a directory the way Explorer does: items from inside the
+ * workspace move, items dragged in from outside the workspace copy. Conflicts
+ * need one explicit confirmation before anything is overwritten.
+ *
+ * Returns true when at least one entry changed on disk.
+ */
+export async function moveEntriesToDirectory(
+  provider: FileTreeHost,
+  sources: readonly vscode.Uri[],
+  targetDirectory: vscode.Uri,
+): Promise<boolean> {
+  const root = provider.rootUri;
+  if (!root || !isInside(root, targetDirectory)) return false;
+
+  const unique = new Map<string, vscode.Uri>();
+  for (const source of sources) {
+    if (source.scheme !== root.scheme || source.path === root.path) continue;
+    unique.set(source.toString(), source);
+  }
+  const entries = [...unique.values()];
+  if (!entries.length) return false;
+
+  const dirty = entries.find((source) => hasDirtyDocuments(source));
+  if (dirty) {
+    void vscode.window.showWarningMessage(t('{0} has unsaved changes. Save or close it first.', baseName(dirty)));
+    return false;
+  }
+
+  const plans: { source: vscode.Uri; target: vscode.Uri; copy: boolean }[] = [];
+  for (const source of entries) {
+    let directory = false;
+    try {
+      directory = ((await vscode.workspace.fs.stat(source)).type & vscode.FileType.Directory) !== 0;
+    } catch (error) {
+      showFileError(t('Could not move {0}.', baseName(source)), error);
+      continue;
+    }
+    if (directory && (targetDirectory.path === source.path || targetDirectory.path.startsWith(`${source.path}/`))) {
+      void vscode.window.showErrorMessage(t('Cannot move {0} into itself.', baseName(source)));
+      continue;
+    }
+    const target = vscode.Uri.joinPath(targetDirectory, baseName(source));
+    if (target.path === source.path) continue;
+    plans.push({ source, target, copy: !isInside(root, source) });
+  }
+  if (!plans.length) return false;
+
+  const conflicts: typeof plans = [];
+  for (const plan of plans) {
+    if (await pathExists(plan.target)) conflicts.push(plan);
+  }
+  let overwrite = false;
+  if (conflicts.length) {
+    const choice = await vscode.window.showWarningMessage(
+      t('{0} already exists. Replace it?', conflicts.map((plan) => baseName(plan.target)).join(', ')),
+      { modal: true },
+      t('Replace'),
+    );
+    if (choice !== t('Replace')) return false;
+    overwrite = true;
+  }
+
+  let changed = false;
+  let failures = 0;
+  for (const plan of plans) {
+    try {
+      if (plan.copy) {
+        await vscode.workspace.fs.copy(plan.source, plan.target, { overwrite });
+      } else {
+        await vscode.workspace.fs.rename(plan.source, plan.target, { overwrite });
+      }
+      changed = true;
+    } catch (error) {
+      failures += 1;
+      showFileError(t('Could not move {0}.', baseName(plan.source)), error);
+    }
+  }
+
+  if (changed) provider.refresh();
+  if (failures) {
+    void vscode.window.showErrorMessage(t('{0} item(s) could not be moved.', failures));
+  }
+  return changed;
+}
+
 async function copyPath(provider: FileTreeHost, item: unknown, relative: boolean): Promise<void> {
   const uri = treeUri(item);
   if (!uri) return;

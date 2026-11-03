@@ -190,6 +190,13 @@ export class CargoService {
     });
   }
 
+  /** Initialize an existing (empty) folder as the package root. */
+  async init(cwd: string, name: string, kind: 'bin' | 'lib', vcs: 'git' | 'none' = 'git'): Promise<RunResult> {
+    return this.exec(['init', '--name', name, kind === 'lib' ? '--lib' : '--bin', '--vcs', vcs], cwd, {
+      timeoutMs: 120_000,
+    });
+  }
+
   async add(
     cwd: string,
     spec: { name: string; version?: string; features?: string[]; optional?: boolean; table?: 'dependencies' | 'dev-dependencies' | 'build-dependencies'; noDefaultFeatures?: boolean; path?: string },

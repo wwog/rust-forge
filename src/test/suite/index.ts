@@ -31,6 +31,8 @@ export async function run(): Promise<void> {
     const commands = await vscode.commands.getCommands(true);
     for (const id of [
       'rustForge.createProject',
+      'rustForge.createSinglePackage',
+      'rustForge.createWorkspace',
       'rustForge.installDependency',
       'rustForge.upgradeDependencies',
       'rustForge.workspaceTopology',
@@ -177,7 +179,10 @@ export async function run(): Promise<void> {
 
   await test('project views are contributed', async () => {
     const pkg = vscode.extensions.getExtension('rust-forge.rust-forge')!.packageJSON as {
-      contributes: { views: Record<string, { id: string }[]> };
+      contributes: {
+        views: Record<string, { id: string }[]>;
+        keybindings?: { command: string; key: string; when?: string }[];
+      };
     };
     const ids = pkg.contributes.views.rustForge.map((view) => view.id);
     assert.deepEqual(ids.sort(), [
@@ -187,8 +192,46 @@ export async function run(): Promise<void> {
     ]);
     // The toolchain view is the last one in the container.
     assert.equal(pkg.contributes.views.rustForge.at(-1)?.id, 'rustForge.toolchain');
+
+    const keybindings = pkg.contributes.keybindings ?? [];
+    assert.ok(
+      keybindings.some(
+        (binding) =>
+          binding.command === 'rustForge.files.rename' &&
+          binding.key === 'f2' &&
+          binding.when?.includes('focusedView == rustForge.project'),
+      ),
+      'F2 rename is not bound to the project view',
+    );
+    assert.ok(
+      keybindings.some(
+        (binding) =>
+          binding.command === 'rustForge.files.rename' && binding.key === 'enter' && binding.when?.includes('isMac'),
+      ),
+      'macOS Enter rename is not bound to the project view',
+    );
   });
 
+  await test('project view contributes create/open actions for non-project folders', async () => {
+    const pkg = vscode.extensions.getExtension('rust-forge.rust-forge')!.packageJSON as {
+      contributes: { viewsWelcome: { view: string; when?: string }[] };
+    };
+    const projectWelcome = pkg.contributes.viewsWelcome.filter((entry) => entry.view === 'rustForge.project');
+    const stateOf = (name: string) =>
+      projectWelcome.find((entry) => entry.when?.includes(`rustForge.folderState == '${name}'`));
+    assert.ok(stateOf('empty'), 'the empty-folder initialization welcome is missing');
+    assert.ok(stateOf('nonRust'), 'the non-Rust create/open welcome is missing');
+    assert.ok(stateOf('noFolder'), 'the no-folder welcome is missing');
+  });
+
+  await test('project tree stays empty without a root manifest instead of listing files', async () => {
+    const provider = new ProjectTreeProvider({ project: undefined, snapshot: undefined, phase: 'idle', errors: [] } as never);
+    try {
+      assert.deepEqual(await provider.getChildren(), []);
+    } finally {
+      provider.dispose();
+    }
+  });
   await test('toolchain view exposes the cargo mirror selector', async () => {
     const provider = new ToolchainTreeProvider({
       phase: 'ready',
@@ -289,6 +332,90 @@ export async function run(): Promise<void> {
       assert.ok(!memberLabels.includes('crates'), 'member contents should expand in place');
     } finally {
       provider.dispose();
+    }
+  });
+
+  await test('files move on drop but crate roots do not', async () => {
+    const dir = '/tmp/rf-dnd';
+    const exists = async (file: string) => {
+      try {
+        await fs.stat(file);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.mkdir(path.join(dir, 'crates', 'app'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'Cargo.toml'), '[workspace]\nmembers = ["crates/app"]\n', 'utf8');
+    await fs.writeFile(
+      path.join(dir, 'crates', 'app', 'Cargo.toml'),
+      '[package]\nname = "app"\nversion = "0.1.0"\n',
+      'utf8',
+    );
+    await fs.writeFile(path.join(dir, 'README.md'), 'hello', 'utf8');
+
+    const root = vscode.Uri.file(dir);
+    const memberUri = vscode.Uri.file(path.join(dir, 'crates', 'app'));
+    const provider = new ProjectTreeProvider({
+      project: {
+        kind: 'workspace',
+        root: dir,
+        manifestPath: path.join(dir, 'Cargo.toml'),
+        members: [
+          {
+            name: 'app',
+            dir: memberUri.fsPath,
+            manifestPath: path.join(memberUri.fsPath, 'Cargo.toml'),
+          },
+        ],
+        emptyWorkspaceShell: false,
+      },
+      snapshot: undefined,
+      phase: 'ready',
+      errors: [],
+    } as never);
+    try {
+      const source = vscode.Uri.file(path.join(dir, 'README.md'));
+      const transfer = new vscode.DataTransfer();
+      provider.handleDrag(
+        [{ kind: 'file', label: 'README.md', resourceUri: source } as never],
+        transfer,
+      );
+      assert.ok(transfer.get('application/vnd.code.tree.rustforge.project'), 'files should be draggable');
+
+      const memberDrag = new vscode.DataTransfer();
+      provider.handleDrag(
+        [{ kind: 'member', label: 'app', resourceUri: memberUri } as never],
+        memberDrag,
+      );
+      assert.equal(
+        memberDrag.get('application/vnd.code.tree.rustforge.project'),
+        undefined,
+        'crate roots should not be draggable',
+      );
+
+      await provider.handleDrop(
+        { kind: 'member', label: 'app', resourceUri: memberUri } as never,
+        transfer,
+        new vscode.CancellationTokenSource().token,
+      );
+      assert.ok(await exists(path.join(memberUri.fsPath, 'README.md')), 'dropped file is missing');
+      assert.ok(!(await exists(source.fsPath)), 'the source file should have moved');
+
+      // Even when a crate directory arrives as an external uri-list drop, it is
+      // not a valid drag source.
+      const memberTransfer = new vscode.DataTransfer();
+      memberTransfer.set('text/uri-list', new vscode.DataTransferItem(memberUri.toString()));
+      await provider.handleDrop(
+        { kind: 'root', label: 'ws', resourceUri: root } as never,
+        memberTransfer,
+        new vscode.CancellationTokenSource().token,
+      );
+      assert.ok(await exists(path.join(memberUri.fsPath, 'Cargo.toml')), 'a crate root must stay in place');
+    } finally {
+      provider.dispose();
+      await fs.rm(dir, { recursive: true, force: true });
     }
   });
 

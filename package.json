@@ -2,7 +2,7 @@
   "name": "rust-forge",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "rust-forge",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -69,8 +69,18 @@
     "viewsWelcome": [
       {
         "view": "rustForge.project",
-        "when": "!rustForge.hasProject",
-        "contents": "%welcome.project%"
+        "when": "!rustForge.hasProject && rustForge.folderState == 'noFolder'",
+        "contents": "%welcome.project.noFolder%"
+      },
+      {
+        "view": "rustForge.project",
+        "when": "!rustForge.hasProject && rustForge.folderState == 'empty'",
+        "contents": "%welcome.project.empty%"
+      },
+      {
+        "view": "rustForge.project",
+        "when": "!rustForge.hasProject && rustForge.folderState == 'nonRust'",
+        "contents": "%welcome.project.nonRust%"
       },
       {
         "view": "rustForge.dependencies",
@@ -89,6 +99,16 @@
         "title": "%command.createProject%",
         "category": "Rust Forge",
         "icon": "$(add)"
+      },
+      {
+        "command": "rustForge.createSinglePackage",
+        "title": "%command.createSinglePackage%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.createWorkspace",
+        "title": "%command.createWorkspace%",
+        "category": "Rust Forge"
       },
       {
         "command": "rustForge.openProject",
@@ -510,6 +530,14 @@
       ],
       "commandPalette": [
         {
+          "command": "rustForge.createSinglePackage",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.createWorkspace",
+          "when": "false"
+        },
+        {
           "command": "rustForge.runTest",
           "when": "false"
         },
@@ -575,6 +603,18 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "rustForge.files.rename",
+        "key": "f2",
+        "when": "focusedView == rustForge.project && listFocus && viewItem =~ /^(file|directory)$/"
+      },
+      {
+        "command": "rustForge.files.rename",
+        "key": "enter",
+        "when": "isMac && focusedView == rustForge.project && listFocus && viewItem =~ /^(file|directory)$/"
+      }
+    ],
     "configuration": {
       "title": "Rust Forge",
       "properties": {

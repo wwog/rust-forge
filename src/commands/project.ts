@@ -5,41 +5,43 @@ import * as vscode from 'vscode';
 import type { ProjectController } from '../projectController.js';
 import type { Services } from '../services.js';
 import { discoverProject, parseManifestFile, planMemberAddition, planMemberRemoval, workspaceTable } from '../core/cargo/project.js';
+import { defaultCrateName, writeWorkspaceSkeleton } from '../core/cargo/scaffold.js';
 import { readTextFile, writeTextFile, relativePath } from '../core/process.js';
 import { generateRustfmtToml } from '../core/rustfmt.js';
 import { t } from '../core/i18n.js';
 import { log, getOutput, writeFilesWithVerification } from './shared.js';
 
-export interface CreateProjectOptions {
-  parentDir: string;
-  name: string;
-  kind: 'bin' | 'lib' | 'workspace';
-  vcs: 'git' | 'none';
-  generateRustfmt: boolean;
-  edition?: string;
-}
+export type CreateProjectPreset = 'package' | 'workspace';
 
-export async function createProjectWizard(controller: ProjectController, services: Services): Promise<void> {
-  const kindPick = await vscode.window.showQuickPick(
-    [
-      { label: t('Binary application'), description: t('cargo new --bin'), value: 'bin' as const },
-      { label: t('Library'), description: t('cargo new --lib'), value: 'lib' as const },
-      { label: t('Workspace root'), description: t('Creates a [workspace] manifest with crates/'), value: 'workspace' as const },
-    ],
-    { title: t('Create Rust project'), placeHolder: t('Choose the project kind') },
-  );
-  if (!kindPick) return;
+/**
+ * `preset` skips the kind question for the empty-folder initialization links:
+ * `package` still asks binary vs library, `workspace` goes straight to naming.
+ */
+export async function createProjectWizard(
+  controller: ProjectController,
+  services: Services,
+  preset?: CreateProjectPreset,
+): Promise<void> {
+  if (preset) {
+    const folder = controller.workspaceFolder;
+    // The empty-folder links initialize the open folder itself; never create a
+    // child directory in that case.
+    if (folder && controller.folderState === 'empty') {
+      await initializeFolder(controller, services, folder, preset);
+      return;
+    }
+  }
 
-  const name = await vscode.window.showInputBox({
-    title: t('Create Rust project'),
-    prompt: t('Crate or workspace name'),
-    value: 'my-rust-project',
-    validateInput: (value) => {
-      if (!value.trim()) return t('A name is required');
-      if (!/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(value.trim())) return t('Use letters, digits, - and _, starting with a letter');
-      return undefined;
-    },
-  });
+  let kind: 'bin' | 'lib' | 'workspace';
+  if (preset === 'workspace') {
+    kind = 'workspace';
+  } else {
+    const picked = await promptProjectKind(preset !== 'package');
+    if (!picked) return;
+    kind = picked;
+  }
+
+  const name = await promptProjectName('my-rust-project');
   if (!name) return;
 
   const folders = vscode.workspace.workspaceFolders ?? [];
@@ -70,46 +72,32 @@ export async function createProjectWizard(controller: ProjectController, service
     parentDir = picked[0].fsPath;
   }
 
-  const targetDir = path.join(parentDir, name.trim());
+  const targetDir = path.join(parentDir, name);
   if (await exists(targetDir)) {
     await vscode.window.showWarningMessage(t('{0} already exists. Choose a different name or folder.', targetDir));
     return;
   }
 
-  const vcsPick = await vscode.window.showQuickPick(
-    [
-      { label: t('Initialize a git repository'), value: 'git' as const },
-      { label: t('No version control'), value: 'none' as const },
-    ],
-    { title: t('Version control') },
-  );
-  if (!vcsPick) return;
+  const vcs = await promptVcs();
+  if (!vcs) return;
 
-  const extras = await vscode.window.showQuickPick(
-    [
-      { label: t('Generate a recommended rustfmt.toml'), value: 'rustfmt', picked: true },
-    ],
-    { title: t('Additional setup'), canPickMany: true },
-  );
-  if (!extras) return;
-
-  const options: CreateProjectOptions = {
-    parentDir,
-    name: name.trim(),
-    kind: kindPick.value,
-    vcs: vcsPick.value,
-    generateRustfmt: extras.some((e) => e.value === 'rustfmt'),
-  };
+  const generateRustfmt = await promptRustfmt();
+  if (generateRustfmt === undefined) return;
 
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: t('Creating Rust project…'), cancellable: false },
     async (progress) => {
-      progress.report({ message: kindPick.value === 'workspace' ? t('Generating workspace manifest') : t('Running cargo new') });
+      progress.report({ message: kind === 'workspace' ? t('Generating workspace manifest') : t('Running cargo new') });
 
-      if (kindPick.value === 'workspace') {
-        await createWorkspaceSkeleton(options);
+      if (kind === 'workspace') {
+        await writeWorkspaceSkeleton(targetDir, {
+          name,
+          vcs,
+          generateRustfmt,
+          language: currentLanguage(),
+        });
       } else {
-        const result = await services.cargo.new(parentDir, options.name, kindPick.value, options.vcs);
+        const result = await services.cargo.new(parentDir, name, kind, vcs);
         if (result.code !== 0) {
           const message = result.missingBinary
             ? t('cargo was not found on PATH. Install rustup first.')
@@ -117,7 +105,7 @@ export async function createProjectWizard(controller: ProjectController, service
           void vscode.window.showErrorMessage(message);
           return;
         }
-        if (options.generateRustfmt) {
+        if (generateRustfmt) {
           await writeTextFile(path.join(targetDir, 'rustfmt.toml'), generateRustfmtToml({ language: currentLanguage() }));
         }
       }
@@ -128,31 +116,115 @@ export async function createProjectWizard(controller: ProjectController, service
   );
 }
 
-async function createWorkspaceSkeleton(options: CreateProjectOptions): Promise<void> {
-  const targetDir = path.join(options.parentDir, options.name);
-  await fs.mkdir(targetDir, { recursive: true });
-  const manifest = [
-    '[workspace]',
-    'members = []',
-    'resolver = "3"',
-    '',
-    '[workspace.package]',
-    'version = "0.1.0"',
-    'edition = "2024"',
-    '',
-  ].join('\n');
-  await writeTextFile(path.join(targetDir, 'Cargo.toml'), manifest);
-  await fs.mkdir(path.join(targetDir, 'crates'), { recursive: true });
-  await writeTextFile(
-    path.join(targetDir, 'README.md'),
-    `# ${options.name}\n\nA Cargo workspace.\n\n## Members\n\nAdd crates under \`crates/\`, then run \`cargo metadata\`.\n`,
+/**
+ * Initialize the open empty folder as the project root. This is deliberately
+ * different from the create wizard: no parent-folder picker and no child
+ * directory, so `Cargo.toml` lands exactly where the user opened the folder.
+ */
+async function initializeFolder(
+  controller: ProjectController,
+  services: Services,
+  folder: vscode.WorkspaceFolder,
+  preset: CreateProjectPreset,
+): Promise<void> {
+  const root = folder.uri.fsPath;
+  // The folder state can be stale between the welcome render and the click;
+  // never overwrite a manifest that appeared in the meantime.
+  if (await exists(path.join(root, 'Cargo.toml'))) {
+    void vscode.window.showWarningMessage(t('{0} already contains Cargo.toml. Refresh the project view first.', root));
+    return;
+  }
+
+  let kind: 'bin' | 'lib' | 'workspace';
+  if (preset === 'workspace') {
+    kind = 'workspace';
+  } else {
+    const picked = await promptProjectKind(false);
+    if (!picked) return;
+    kind = picked;
+  }
+
+  const name = await promptProjectName(defaultCrateName(root));
+  if (!name) return;
+
+  const vcs = await promptVcs();
+  if (!vcs) return;
+
+  const generateRustfmt = await promptRustfmt();
+  if (generateRustfmt === undefined) return;
+
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: t('Initializing Rust project…'), cancellable: false },
+    async (progress) => {
+      progress.report({ message: kind === 'workspace' ? t('Generating workspace manifest') : t('Running cargo init') });
+
+      if (kind === 'workspace') {
+        await writeWorkspaceSkeleton(root, { name, vcs, generateRustfmt, language: currentLanguage() });
+      } else {
+        const result = await services.cargo.init(root, name, kind, vcs);
+        if (result.code !== 0) {
+          const message = result.missingBinary
+            ? t('cargo was not found on PATH. Install rustup first.')
+            : result.stderr.trim() || t('cargo init failed');
+          void vscode.window.showErrorMessage(message);
+          return;
+        }
+        if (generateRustfmt) {
+          await writeTextFile(path.join(root, 'rustfmt.toml'), generateRustfmtToml({ language: currentLanguage() }));
+        }
+      }
+
+      await controller.load(root);
+    },
   );
-  if (options.vcs === 'git') {
-    await writeTextFile(path.join(targetDir, '.gitignore'), '/target\n');
-  }
-  if (options.generateRustfmt) {
-    await writeTextFile(path.join(targetDir, 'rustfmt.toml'), generateRustfmtToml({ language: currentLanguage() }));
-  }
+}
+
+async function promptProjectKind(includeWorkspace: boolean): Promise<'bin' | 'lib' | 'workspace' | undefined> {
+  const kinds = [
+    { label: t('Binary application'), description: t('Creates src/main.rs'), value: 'bin' as const },
+    { label: t('Library'), description: t('Creates src/lib.rs'), value: 'lib' as const },
+    ...(includeWorkspace
+      ? [{ label: t('Workspace root'), description: t('Creates a [workspace] manifest with crates/'), value: 'workspace' as const }]
+      : []),
+  ];
+  const picked = await vscode.window.showQuickPick(kinds, {
+    title: t('Create Rust project'),
+    placeHolder: t('Choose the project kind'),
+  });
+  return picked?.value;
+}
+
+async function promptProjectName(defaultValue: string): Promise<string | undefined> {
+  const value = await vscode.window.showInputBox({
+    title: t('Create Rust project'),
+    prompt: t('Crate or workspace name'),
+    value: defaultValue,
+    validateInput: (input) => {
+      if (!input.trim()) return t('A name is required');
+      if (!/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(input.trim())) return t('Use letters, digits, - and _, starting with a letter');
+      return undefined;
+    },
+  });
+  return value?.trim();
+}
+
+async function promptVcs(): Promise<'git' | 'none' | undefined> {
+  const picked = await vscode.window.showQuickPick(
+    [
+      { label: t('Initialize a git repository'), value: 'git' as const },
+      { label: t('No version control'), value: 'none' as const },
+    ],
+    { title: t('Version control') },
+  );
+  return picked?.value;
+}
+
+async function promptRustfmt(): Promise<boolean | undefined> {
+  const extras = await vscode.window.showQuickPick(
+    [{ label: t('Generate a recommended rustfmt.toml'), value: 'rustfmt', picked: true }],
+    { title: t('Additional setup'), canPickMany: true },
+  );
+  return extras === undefined ? undefined : extras.some((extra) => extra.value === 'rustfmt');
 }
 
 export async function openProjectWizard(controller: ProjectController): Promise<void> {

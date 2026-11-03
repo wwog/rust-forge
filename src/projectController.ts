@@ -4,6 +4,7 @@
  * Owns the active ProjectModel plus derived data (metadata, dependency tree,
  * toolchain state) and fires events so every view refreshes consistently.
  */
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as semver from 'semver';
 import * as vscode from 'vscode';
@@ -18,6 +19,18 @@ import type { ToolchainState } from './core/toolchain.js';
 import type { Services } from './services.js';
 import type { PropertiesModel } from './core/properties.js';
 import { readProperties } from './core/properties.js';
+import { fileExists } from './core/process.js';
+
+/**
+ * What the open workspace folder contains when it is not a Rust project.
+ *
+ * - `noFolder`: no folder is open at all.
+ * - `unknown`: the root manifest is still being checked.
+ * - `empty`: the folder has no entries, so it starts the initialization flow.
+ * - `nonRust`: the folder has content but no `Cargo.toml` at its root.
+ * - `rust`: a root manifest exists and the project model is (being) loaded.
+ */
+export type FolderState = 'noFolder' | 'unknown' | 'empty' | 'nonRust' | 'rust';
 
 export interface ProjectSnapshot {
   model: ProjectModel;
@@ -40,6 +53,7 @@ export class ProjectController implements vscode.Disposable {
   private propertiesModel: PropertiesModel | undefined;
   private lastErrors: string[] = [];
   private loadPhase: LoadPhase = 'idle';
+  private folderStateValue: FolderState = 'noFolder';
   private loadPromise: Promise<void> | undefined;
 
   private readonly extraDisposables: vscode.Disposable[] = [];
@@ -58,6 +72,11 @@ export class ProjectController implements vscode.Disposable {
 
   get project(): ProjectModel | undefined {
     return this.model;
+  }
+
+  /** Contents of the workspace folder while no project is loaded. */
+  get folderState(): FolderState {
+    return this.model ? 'rust' : this.folderStateValue;
   }
 
   get snapshot(): ProjectSnapshot | undefined {
@@ -103,17 +122,26 @@ export class ProjectController implements vscode.Disposable {
   async initialize(): Promise<void> {
     const folder = this.workspaceFolder;
     if (!folder) {
-      this.setEmpty();
+      this.setNoProject('noFolder');
       return;
     }
     // Publish the loading state before the first filesystem/cargo round-trip so
     // the views do not render their "no project" welcome while we are looking.
+    this.folderStateValue = 'unknown';
     this.setPhase('loading');
     try {
+      // Only a manifest at the workspace-folder root makes this a Rust project.
+      // Searching ancestors here would list the files of an ordinary,
+      // non-Rust folder as if it were a project.
+      if (!(await fileExists(path.join(folder.uri.fsPath, 'Cargo.toml')))) {
+        this.setNoProject(await classifyNoProjectFolder(folder.uri.fsPath));
+        return;
+      }
+      this.folderStateValue = 'rust';
       const discovered = await discoverProject(folder.uri.fsPath, { respectMembership: false });
       if (!discovered.model) {
         if (discovered.error && discovered.error !== 'no-manifest') this.fail(discovered.error);
-        else this.setEmpty();
+        else this.setNoProject(await classifyNoProjectFolder(folder.uri.fsPath));
         return;
       }
       await this.load(discovered.model.root);
@@ -137,11 +165,12 @@ export class ProjectController implements vscode.Disposable {
 
     const built = await buildModel(dir);
     if (!built.model) {
-      if (built.error === 'no-manifest') this.setEmpty();
+      if (built.error === 'no-manifest') this.setNoProject(await classifyNoProjectFolder(dir));
       else this.fail(built.error ?? 'Could not read the Cargo manifest.');
       return;
     }
     this.model = built.model;
+    this.folderStateValue = 'rust';
 
     const metadataResult = await this.services.cargo.metadata(dir, { noDeps: true });
     if (metadataResult.ok && metadataResult.metadata) {
@@ -261,13 +290,14 @@ export class ProjectController implements vscode.Disposable {
     return this.model.rootPackage?.name ?? this.model.members[0]?.name ?? '';
   }
 
-  private setEmpty(error?: string): void {
+  private setNoProject(state: FolderState, error?: string): void {
     this.model = undefined;
     this.metadata = undefined;
     this.depTree = undefined;
     this.toolchainState = undefined;
     this.auditResult = undefined;
     this.propertiesModel = undefined;
+    this.folderStateValue = state;
     this.lastErrors = error && error !== 'no-manifest' ? [error] : [];
     this.setPhase('idle');
     this.onDidChangeEmitter.fire();
@@ -287,9 +317,10 @@ export class ProjectController implements vscode.Disposable {
     this.onDidChangeEmitter.fire();
   }
 
-  /** Clear project state (used when no folder is open). */
+  /** Clear project state and re-inspect the workspace folder. */
   reset(): void {
-    this.setEmpty();
+    this.folderStateValue = 'unknown';
+    void this.initialize();
   }
 
   async refresh(): Promise<void> {
@@ -323,6 +354,7 @@ export class ProjectController implements vscode.Disposable {
   private async updateContextKeys(): Promise<void> {
     const hasProject = !!this.model;
     await vscode.commands.executeCommand('setContext', 'rustForge.hasProject', hasProject);
+    await vscode.commands.executeCommand('setContext', 'rustForge.folderState', this.folderState);
     await vscode.commands.executeCommand('setContext', 'rustForge.loading', this.loadPhase === 'loading');
     await vscode.commands.executeCommand('setContext', 'rustForge.isWorkspace', this.model?.kind === 'workspace');
     await vscode.commands.executeCommand('setContext', 'rustForge.singlePackage', this.model?.kind === 'package');
@@ -347,6 +379,19 @@ export class ProjectController implements vscode.Disposable {
 
 function truncate(value: string, limit = 400): string {
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
+}
+
+/**
+ * Classify a folder that has no root `Cargo.toml`. Finder leaves `.DS_Store`
+ * behind in otherwise empty folders, so that file alone still counts as empty.
+ */
+async function classifyNoProjectFolder(root: string): Promise<FolderState> {
+  try {
+    const entries = await fs.readdir(root);
+    return entries.some((name) => name !== '.DS_Store') ? 'nonRust' : 'empty';
+  } catch {
+    return 'nonRust';
+  }
 }
 
 export { parseManifestFile, path };
