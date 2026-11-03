@@ -108,14 +108,16 @@
         "category": "Rust Forge"
       },
       {
-        "command": "rustForge.runTest",
-        "title": "%command.runTest%",
-        "category": "Rust Forge"
-      },
-      {
         "command": "rustForge.run",
         "title": "%command.run%",
-        "category": "Rust Forge"
+        "category": "Rust Forge",
+        "icon": "$(play)"
+      },
+      {
+        "command": "rustForge.runTest",
+        "title": "%command.runTest%",
+        "category": "Rust Forge",
+        "icon": "$(beaker)"
       },
       {
         "command": "rustForge.files.newFile",
@@ -365,7 +367,7 @@
         {
           "command": "rustForge.files.revealInOS",
           "when": "view == rustForge.project && viewItem =~ /^(file|directory|rootDirectory|member|workspaceRoot|rootPackage)(:|$)/",
-          "group": "navigation@2"
+          "group": "0_navigation@1"
         },
         {
           "command": "rustForge.files.rename",
@@ -393,14 +395,24 @@
           "group": "1_modification@1"
         },
         {
+          "command": "rustForge.run",
+          "when": "view == rustForge.project && viewItem =~ /^(workspaceRoot|rootPackage|member):binary$/",
+          "group": "navigation@0"
+        },
+        {
           "command": "rustForge.runTest",
           "when": "view == rustForge.project && viewItem =~ /^(workspaceRoot|rootPackage|member)(:|$)/",
-          "group": "navigation@3"
+          "group": "navigation@1"
         },
         {
           "command": "rustForge.run",
           "when": "view == rustForge.project && viewItem =~ /^(workspaceRoot|rootPackage|member):binary$/",
-          "group": "navigation@4"
+          "group": "inline@3"
+        },
+        {
+          "command": "rustForge.runTest",
+          "when": "view == rustForge.project && viewItem =~ /^(workspaceRoot|rootPackage|member)(:|$)/",
+          "group": "inline@4"
         },
         {
           "command": "rustForge.upgradeDependency",
