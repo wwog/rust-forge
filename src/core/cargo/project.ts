@@ -99,11 +99,8 @@ export async function expandMembers(
 ): Promise<DiscoveredPackage[]> {
   const result: DiscoveredPackage[] = [];
   const seen = new Set<string>();
-  const excludes = excludePatterns.map(normalizeMemberPattern).filter(Boolean);
 
   const add = async (dir: string, fallbackName: string): Promise<void> => {
-    const relative = path.relative(root, dir);
-    if (excludes.some((pattern) => matchesMemberPattern(relative, pattern))) return;
     const manifestPath = path.join(dir, 'Cargo.toml');
     if (!(await fileExists(manifestPath))) return;
     if (seen.has(manifestPath)) return;
@@ -122,10 +119,34 @@ export async function expandMembers(
       continue;
     }
     for (const dir of await expandGlobDirs(normalized.split('/'), 0, root)) {
+      // Cargo applies `exclude` only to glob-expanded members; an explicit
+      // member path wins over `exclude` (verified with cargo 1.99).
+      if (isWorkspacePathExcluded(path.relative(root, dir), excludePatterns)) continue;
       await add(dir, path.basename(dir));
     }
   }
   return result.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Cargo's `workspace.exclude` semantics for a glob-expanded candidate.
+ *
+ * - A plain path excludes that path and every directory below it, so
+ *   `exclude = ["crates"]` drops `crates/app` when `members = ["crates/*"]`.
+ * - A glob matches the path itself only: `exclude = ["crates/*"]` does not
+ *   drop `crates/group/app`.
+ * - Explicit `members` entries bypass `exclude` entirely; callers must only
+ *   apply this to glob expansion.
+ */
+export function isWorkspacePathExcluded(relative: string, excludePatterns: readonly string[]): boolean {
+  const normalized = normalizeMemberPattern(relative);
+  if (!normalized) return false;
+  return excludePatterns.some((raw) => {
+    const pattern = normalizeMemberPattern(raw);
+    if (!pattern) return false;
+    if (hasGlob(pattern)) return matchesMemberPattern(normalized, pattern);
+    return normalized === pattern || normalized.startsWith(`${pattern}/`);
+  });
 }
 
 function normalizeMemberPattern(pattern: string): string {
@@ -281,10 +302,22 @@ export function planMemberRemoval(manifestText: string, relativeDir: string): Me
     edits.push(...editor.setKey('workspace', 'members', formatStringArray(nextMembers)));
   }
   if (coveredByGlob) {
-    const alreadyExcluded = excludes.some((pattern) => normalizeMemberPattern(pattern) === relative);
+    const alreadyExcluded = isWorkspacePathExcluded(relative, excludes);
     if (!alreadyExcluded) {
       edits.push(...editor.setKey('workspace', 'exclude', formatStringArray([...excludes, relative])));
     }
+  }
+
+  // Cargo rejects a `default-members` entry that no longer resolves to a
+  // member, so drop exact matches alongside the member entry.
+  const defaultMembers = stringArray(ws?.['default-members']);
+  const nextDefaults = defaultMembers.filter((pattern) => normalizeMemberPattern(pattern) !== relative);
+  if (nextDefaults.length !== defaultMembers.length) {
+    edits.push(
+      ...(nextDefaults.length
+        ? editor.setKey('workspace', 'default-members', formatStringArray(nextDefaults))
+        : editor.removeKey('workspace', 'default-members')),
+    );
   }
 
   return { changed: true, text: editor.apply(edits) };
@@ -311,16 +344,23 @@ export function planMemberAddition(manifestText: string, memberPattern: string):
   const target = normalizeMemberPattern(memberPattern);
   if (!target) return { changed: false, text: manifestText };
 
-  const covered = members.some(
-    (member) => normalizeMemberPattern(member) === target || (hasGlob(member) && matchesMemberPattern(target, member)),
+  const explicit = members.some((member) => normalizeMemberPattern(member) === target);
+  const coveredByGlob = members.some(
+    (member) => hasGlob(member) && !explicit && matchesMemberPattern(target, member),
   );
+  const excluded = isWorkspacePathExcluded(target, excludes);
+  // An exact exclude entry can simply be dropped. An ancestor/glob exclude
+  // cannot (that would include other directories), but an explicit member
+  // entry wins over `exclude`, so adding one is the precise way to include a
+  // directory that a member glob would otherwise drop.
+  const exactExclude = excludes.some((pattern) => normalizeMemberPattern(pattern) === target);
   const nextExcludes = excludes.filter((pattern) => normalizeMemberPattern(pattern) !== target);
 
   const editor = new TomlEditor(manifestText);
   if (!editor.hasTable('workspace')) return { changed: false, text: manifestText };
 
   const edits: TextEdit[] = [];
-  if (!covered) {
+  if (!explicit && (!coveredByGlob || (excluded && !exactExclude))) {
     edits.push(...editor.setKey('workspace', 'members', formatStringArray([...members, memberPattern])));
   }
   if (nextExcludes.length !== excludes.length) {

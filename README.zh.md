@@ -10,9 +10,10 @@
 | 领域 | 功能说明 |
 |---|---|
 | **项目视图** | 检测 `Cargo.toml`，区分单包与工作区，创建 bin/lib/工作区项目（`cargo new`，或生成使用 edition 2024、resolver 3 的 `[workspace]` 骨架），打开已有项目（当文件夹是工作区成员时会给出提示），并添加/移除成员。同一棵树同时是项目文件浏览器：根节点下列出工作区成员与根目录文件/文件夹，成员直接展开自身目录（不再显示 `crates` 分组目录）。懒加载、跟随当前文件图标主题、遵循 `files.exclude`，支持新建文件/文件夹、重命名、删除到废纸篓、复制路径、在文件管理器中显示、在侧边打开，并随文件系统变化自动刷新。右键成员或项目根可**运行测试**（根节点运行整个工作区）；**运行**仅对二进制 crate 显示，依据 `src/main.rs`、`src/bin/*` 或 `[[bin]]` 目标检测，并遵循 `autobins`。 |
-| **依赖** | 仅展示*直接声明*的依赖树。工作区中，根清单的 `[workspace.dependencies]` 会置顶显示，并分为**本地依赖**与**远端依赖**两组；右键根依赖可快速引入到一个或多个成员。工作区成员可展开以查看内部 path 依赖拓扑；传递依赖保持隐藏。每个节点显示声明的版本要求、`Cargo.lock` 中的锁定版本以及 crates.io 上的最新版本。书本图标操作会打开该 crate 的 crates.io 页面；红色垃圾桶图标会在二次确认并通过 `cargo check` 校验后移除声明。 |
-| **依赖体检** | 依赖视图标题栏的脉冲图标会执行体检。基于 `cargo tree -d`，按包聚合重复版本，展示每个版本的依赖来源路径与选择该版本的版本约束，并解释约束是真正冲突还是仅范围重叠。同时标记源码中未引用的声明（启发式扫描）、没有成员继承或被成员直接声明绕过的 `[workspace.dependencies]` 条目，以及成员之间的版本不一致。 |
-| **安全升级** | 在声明范围内、符合 SemVer 的更新被归类为**安全**并默认勾选。主版本（以及 `0.x` 次版本）升级需要显式确认，并提供该 crate 的文档链接。feature 集合发生变化时会被保留下来供审阅。 |
+| **依赖** | 仅展示*直接声明*的依赖树。工作区中，根清单的 `[workspace.dependencies]` 会置顶显示，并分为**本地依赖**与**远端依赖**两组；右键根依赖可快速引入到一个或多个成员，右键任意直接声明可**提升为 `[workspace.dependencies]`**（公共 feature 合并到条目，成员保留额外 feature 与 `optional`）。工作区成员可展开以查看内部 path 依赖拓扑；传递依赖保持隐藏。每个节点显示声明的版本要求、`Cargo.lock` 中的锁定版本以及 crates.io 上的最新版本。书本图标操作会打开该 crate 的 crates.io 页面；红色垃圾桶图标会在二次确认并通过 `cargo check` 校验后移除声明。 |
+| **依赖体检** | 依赖视图标题栏的脉冲图标会执行体检。基于 `cargo tree -d`，按包聚合重复版本，展示每个版本的依赖来源路径与选择该版本的版本约束，并解释约束是真正冲突还是仅范围重叠。同时标记源码中未引用的声明（启发式扫描）、没有成员继承或被成员直接声明绕过的 `[workspace.dependencies]` 条目，以及成员之间的版本不一致。**统一为继承**可一步把绕过 workspace 表的声明改写为 `workspace = true`，并保留成员各自的 feature、`optional` 与 `default-features`。 |
+| **安全升级** | 在声明范围内、符合 SemVer 的更新被归类为**安全**并默认勾选；**一键安全升级**会批量应用所有符合条件的条目。每个条目展示版本约束的前后变化、crate feature 的增删（含默认 feature 变化），以及目标版本的 `rust-version` 高于当前工具链时的警告（此类条目不会被自动勾选）。已满足目标版本的约束只刷新 `Cargo.lock`；清单重写与锁文件刷新是分开的步骤。主版本（以及 `0.x` 次版本）升级需要显式确认，并提供该 crate 的文档链接。 |
+| **工作区拓扑** | 专用面板按 Cargo 的真实语义展示成员、`default-members` 与 `exclude`（显式成员优先于 exclude、展开 glob、拒绝无效的默认成员）。可切换默认成员、增删排除目录，并查看哪些 glob 因此少解析了 crate。成员支持**移动/重命名**：所有成员中的相对 path 依赖、target 表、`[workspace.dependencies]` 与 `[patch]` 条目都会重写，随后移动目录并校验。 |
 | **安装** | crates.io 搜索 → 选择 crate → 右侧抽屉中设置版本约束、依赖类型、features，并多选目标成员 → 写入。安装操作只在详情视图中出现。从视图标题进入工作区时默认不选成员，只写入 `[workspace.dependencies]`；选中的成员会收到 `workspace = true` 引用。单包项目始终写入根清单。写入前会检查锁文件状态。 |
 | **工具链** | 读取 `rust-toolchain.toml`，回退到 `rustup show active-toolchain`。显示当前生效的 channel、已安装列表、可用更新，以及编译器是否满足 `rust-version`。缺少 `cargo`/`rustup` 时会弹出带命令预览的阻塞式提示。 |
 | **属性** | 以表单方式编辑包标识、发布元数据与构建选项：`version`、`edition`、`rust-version`、`authors`、`license`、`license-file`、`repository`、`homepage`、`documentation`、`readme`、`keywords`、`categories`、`publish`、`include`/`exclude`、`build`、`links`、`default-run`、自动发现开关，以及 `[workspace]` 级策略（resolver、成员列表、默认成员、排除路径）。workspace 模式还可编辑供成员继承的 `[workspace.package]` 默认值。 |
@@ -72,4 +73,4 @@ npm run package    # 生成 .vsix
 - 有意不列出传递依赖。
 - 未使用依赖检测基于 Rust 源文件扫描，属于启发式判断；可选依赖或仅通过 derive 使用的 crate 可能被跳过。
 - 不稳定的 rustfmt 选项只在你主动选择时才会写入；稳定的 rustfmt 会忽略它们并给出警告。
-- 有意不使用 `cargo update --precise`；升级会重写版本要求，由 Cargo 自行解析。
+- `cargo update --precise` 仅用于“只刷新锁文件”的场景；需要重写版本约束时使用 `cargo update -p <name>`，由 Cargo 在新约束内自行解析。

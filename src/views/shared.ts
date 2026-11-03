@@ -1,5 +1,6 @@
 /** Shared tree view plumbing. */
 import * as vscode from 'vscode';
+import { t } from '../core/i18n.js';
 
 export type TreeElement = vscode.TreeItem;
 
@@ -18,6 +19,36 @@ export function makeItem(
   collapsible: vscode.TreeItemCollapsibleState = vscode.TreeItemCollapsibleState.None,
 ): vscode.TreeItem {
   return new vscode.TreeItem(label, collapsible);
+}
+
+/**
+ * Transient tree row for a view that is loading, refreshing or failed to load.
+ * Rendering a row (instead of nothing) also keeps VS Code from showing the
+ * view's welcome content — the create-project call to action — mid-load.
+ */
+export interface StatusNode {
+  readonly status: 'loading' | 'error';
+  readonly label: string;
+  readonly tooltip?: string;
+  readonly command?: vscode.Command;
+}
+
+export function isStatusNode(value: unknown): value is StatusNode {
+  return typeof value === 'object' && value !== null && 'status' in value;
+}
+
+export function statusTreeItem(node: StatusNode): vscode.TreeItem {
+  const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
+  item.iconPath = new vscode.ThemeIcon(node.status === 'loading' ? 'sync~spin' : 'error');
+  item.tooltip = node.tooltip ?? node.label;
+  item.contextValue = `status:${node.status}`;
+  item.command = node.command;
+  return item;
+}
+
+/** Status row for an error phase, with a retry affordance. */
+export function errorStatus(label: string, tooltip?: string): StatusNode {
+  return { status: 'error', label, tooltip, command: { command: 'rustForge.refresh', title: t('Retry') } };
 }
 
 export function relativePathLabel(folder: vscode.WorkspaceFolder, absolute: string): string {

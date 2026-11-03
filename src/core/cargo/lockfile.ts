@@ -1,7 +1,9 @@
 /** Cargo.lock parsing: resolved versions keyed by crate name. */
 import * as path from 'node:path';
+import * as semver from 'semver';
 import { parse as parseToml } from 'smol-toml';
 import { fileExists, readTextFile } from '../process.js';
+import { cargoReqToRange } from '../deps/versions.js';
 
 export interface LockedPackage {
   name: string;
@@ -60,13 +62,12 @@ export function parseLockfile(text: string, file = 'Cargo.lock'): LockfileInfo |
 
   for (const list of versions.values()) {
     list.sort((a, b) => {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const semver = require('semver') as typeof import('semver');
-        return semver.rcompare(a, b);
-      } catch {
-        return b.localeCompare(a);
-      }
+      // Stable releases first: a `2.0.0-rc.1` must never shadow `1.10.0` just
+      // because its core version is higher.
+      const aStable = isStable(a);
+      const bStable = isStable(b);
+      if (aStable !== bStable) return aStable ? -1 : 1;
+      return semver.rcompare(a, b);
     });
   }
 
@@ -78,12 +79,32 @@ export function parseLockfile(text: string, file = 'Cargo.lock'): LockfileInfo |
   };
 }
 
+function isStable(version: string): boolean {
+  const parsed = semver.parse(version);
+  return !!parsed && parsed.prerelease.length === 0;
+}
+
 /** Is a package resolved in the lockfile? */
 export function isLocked(lock: LockfileInfo | undefined, name: string): boolean {
   return !!lock?.versions.get(name)?.length;
 }
 
-/** Locked version of a direct dependency, if present. */
-export function lockedVersion(lock: LockfileInfo | undefined, name: string): string | undefined {
-  return lock?.versions.get(name)?.[0];
+/**
+ * Locked version of a direct dependency. When a requirement is supplied and
+ * the crate is locked at several versions, prefer the one that satisfies the
+ * declaration instead of merely the highest.
+ */
+export function lockedVersion(
+  lock: LockfileInfo | undefined,
+  name: string,
+  requirement?: string,
+): string | undefined {
+  const versions = lock?.versions.get(name);
+  if (!versions?.length) return undefined;
+  const range = requirement ? cargoReqToRange(requirement) : undefined;
+  if (range) {
+    const match = versions.find((version) => semver.satisfies(version, range, { includePrerelease: false }));
+    if (match) return match;
+  }
+  return versions[0];
 }

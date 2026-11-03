@@ -9,17 +9,29 @@ import { createTwoFilesPatch } from 'diff';
 import { readTextFile, relativePath } from './process.js';
 import { TomlEditor, formatKeyPath, quoteString } from './toml/editor.js';
 import type { ProjectModel } from './cargo/project.js';
+import { unexpectedContainerEntries, workspaceContainers } from './files.js';
 import { applyTopLevelOptionEdits, generateRustfmtToml, type RustfmtEdit } from './rustfmt.js';
 
-export type FindingKind = 'fmt-in-manifest' | 'fmt-missing' | 'lints-inline' | 'clippy-config-in-manifest';
+export type FindingKind =
+  | 'fmt-in-manifest'
+  | 'fmt-missing'
+  | 'lints-inline'
+  | 'clippy-config-in-manifest'
+  | 'workspace-container-content';
 
 export interface ProposedChange {
   /** Absolute target path. */
   path: string;
-  /** New content. */
+  /** New content, computed from the original file. */
   content: string;
   /** Existing content, or undefined when the file will be created. */
   original?: string;
+  /**
+   * Re-applies this change to already-transformed text. Needed so several
+   * findings that target the same manifest compose instead of overwriting
+   * each other.
+   */
+  transform?: (current: string) => string;
   /** Why this file changes, shown above the diff. */
   reason: string;
   reasonZh: string;
@@ -76,6 +88,7 @@ export async function analyzeStandardization(model: ProjectModel): Promise<Stand
         {
           path: model.manifestPath,
           content: removeTables(rootManifest, ['package.metadata.rustfmt']),
+          transform: (current) => removeTables(current, ['package.metadata.rustfmt']),
           original: rootManifest,
           reason: 'Remove the metadata table',
           reasonZh: '移除原 metadata 表',
@@ -129,6 +142,7 @@ export async function analyzeStandardization(model: ProjectModel): Promise<Stand
           {
             path: model.manifestPath,
             content: updated,
+            transform: (current) => migrateLintsToWorkspace(current),
             original: rootManifest,
             reason: 'Move [lints.*] to [workspace.lints.*]',
             reasonZh: '将 [lints.*] 迁移为 [workspace.lints.*]',
@@ -163,12 +177,48 @@ export async function analyzeStandardization(model: ProjectModel): Promise<Stand
         {
           path: model.manifestPath,
           content: removeTables(rootManifest, ['package.metadata.clippy']),
+          transform: (current) => removeTables(current, ['package.metadata.clippy']),
           original: rootManifest,
           reason: 'Remove the metadata table',
           reasonZh: '移除原 metadata 表',
         },
       ],
     });
+  }
+
+  // 5. A member container (`crates`, `packages`, …) that holds entries no
+  //    member accounts for. The project view still shows its stray files, but
+  //    the structure is ambiguous, so this is reported without an auto-fix.
+  if (model.kind === 'workspace') {
+    const containers = workspaceContainers(
+      model.root,
+      model.members.map((member) => member.dir),
+    );
+    for (const container of containers) {
+      let entries: { name: string; isDirectory: boolean }[];
+      try {
+        entries = (await fs.readdir(container.dir, { withFileTypes: true })).map((entry) => ({
+          name: entry.name,
+          isDirectory: entry.isDirectory(),
+        }));
+      } catch {
+        continue;
+      }
+      const stray = unexpectedContainerEntries(container, entries);
+      if (!stray.length) continue;
+      const names = stray.map((entry) => (entry.isDirectory ? `${entry.name}/` : entry.name)).sort();
+      findings.push({
+        id: `container:${container.name}`,
+        kind: 'workspace-container-content',
+        title: `Workspace container "${container.name}" contains entries outside members`,
+        titleZh: `成员容器目录 “${container.name}” 含有非成员内容`,
+        description: `The project view lists only files here. Decide what belongs there: ${names.join(', ')}.`,
+        descriptionZh: `项目视图在此处只显示文件，请自行决定这些条目的去留：${names.join('、')}。`,
+        manifestPath: model.manifestPath,
+        fixable: false,
+        changes: [],
+      });
+    }
   }
 
   return { findings, ok: findings.length === 0 };
@@ -259,17 +309,18 @@ export function migrateLintsToWorkspace(manifestText: string): string {
   if (!blocks.length) return manifestText;
 
   const edits = removeTablesEdits(editor, ['lints']);
-  // The member now inherits instead of declaring its own levels.
-  const hasWorkspace = editor.hasTable('workspace');
-  const tail = blocks.join('\n\n');
-  if (hasWorkspace) {
-    const text = editor.apply(edits);
-    const prefix = text.endsWith('\n\n') ? '' : text.endsWith('\n') ? editor.eol : editor.eol + editor.eol;
-    return normalize(`${text}${prefix}${tail}\n`);
-  }
+  // The package still has to opt in; without `[lints] workspace = true` the
+  // moved levels are inert.
+  // A child table such as `[workspace.package]` already implies `[workspace]`;
+  // appending an explicit parent afterwards would be a TOML redefinition.
+  const hasWorkspace = editor.hasTable('workspace') || editor.getChildTables('workspace').length > 0;
   const base = editor.apply(edits);
+  const sections: string[] = [];
+  if (!hasWorkspace) sections.push('[workspace]');
+  sections.push('[lints]\nworkspace = true');
+  sections.push(...blocks);
   const prefix = base.endsWith('\n\n') ? '' : base.endsWith('\n') ? editor.eol : editor.eol + editor.eol;
-  return normalize(`${base}${prefix}[workspace]${editor.eol}${editor.eol}${tail}\n`);
+  return normalize(`${base}${prefix}${sections.join('\n\n')}\n`);
 }
 
 function removeTables(manifestText: string, tables: string[]): string {
@@ -290,8 +341,51 @@ function removeTablesEdits(editor: TomlEditor, tables: string[]) {
   return edits;
 }
 
+/**
+ * Collapse runs of blank lines without touching multiline string values.
+ * A blind `\n{3,}` replace would rewrite the contents of `"""..."""`.
+ */
 function normalize(text: string): string {
-  return text.replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+  let result = '';
+  let index = 0;
+  while (index < text.length) {
+    if (text.startsWith('"""', index)) {
+      const end = text.indexOf('"""', index + 3);
+      const stop = end < 0 ? text.length : end + 3;
+      result += text.slice(index, stop);
+      index = stop;
+      continue;
+    }
+    if (text.startsWith("'''", index)) {
+      const end = text.indexOf("'''", index + 3);
+      const stop = end < 0 ? text.length : end + 3;
+      result += text.slice(index, stop);
+      index = stop;
+      continue;
+    }
+    const ch = text[index];
+    if (ch === '"' || ch === "'") {
+      // Single-line string: copy it verbatim, honoring escapes.
+      let stop = index + 1;
+      while (stop < text.length && text[stop] !== ch) {
+        stop += ch === '"' && text[stop] === '\\' ? 2 : 1;
+      }
+      stop = Math.min(stop + 1, text.length);
+      result += text.slice(index, stop);
+      index = stop;
+      continue;
+    }
+    if (ch === '\n') {
+      let run = index;
+      while (text[run] === '\n') run++;
+      result += '\n'.repeat(Math.min(run - index, 2));
+      index = run;
+      continue;
+    }
+    result += ch;
+    index += 1;
+  }
+  return result.trimEnd() + '\n';
 }
 
 export interface StandardizeApplyOptions {
@@ -309,22 +403,29 @@ export interface StandardizeChangePreview {
 
 /** Compute the diffs for the selected findings. */
 export function previewStandardization(root: string, findings: StandardizeFinding[]): StandardizeChangePreview[] {
-  // Later findings win when two would write the same file, so run the merge on
-  // a path-keyed map rather than emitting duplicate writes.
+  // Several findings can target the same manifest. Each manifest change is
+  // re-applied to the accumulated text so both survive; a plain "last writer
+  // wins" would silently discard the earlier extraction.
   const byPath = new Map<string, StandardizeChangePreview>();
+  const contents = new Map<string, string>();
   for (const finding of findings) {
     for (const change of finding.changes) {
-      const before = byPath.get(change.path)?.newContent ?? change.original ?? '';
+      const current = contents.get(change.path) ?? change.original ?? '';
+      const next = change.transform ? change.transform(current) : change.content;
+      contents.set(change.path, next);
+
+      const earlier = byPath.get(change.path);
+      const original = earlier?.original ?? change.original;
       byPath.set(change.path, {
         path: change.path,
-        original: change.original,
-        newContent: change.content,
+        original,
+        newContent: next,
         diff: createTwoFilesPatch(
           relativePath(root, change.path),
           relativePath(root, change.path),
-          before,
-          change.content,
-          change.original === undefined ? 'absent' : 'before',
+          original ?? '',
+          next,
+          original === undefined ? 'absent' : 'before',
           'after',
         ),
       });

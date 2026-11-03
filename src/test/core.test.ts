@@ -6,6 +6,7 @@ import test from 'node:test';
 import { parseDependencies, declarationTablePath } from '../core/cargo/manifestDeps.js';
 import { parse } from 'smol-toml';
 import { analyzeStandardization, migrateLintsToWorkspace } from '../core/standardize.js';
+import { buildModel } from '../core/cargo/project.js';
 import {
   applyPropertyEdits,
   validateProperty,
@@ -545,4 +546,33 @@ test('workspace dependencies are pinned above members and split local/remote', (
   assert.equal(local?.children?.[0].localTarget, 'inner');
   assert.deepEqual(remote?.children?.map((node) => node.label), ['serde']);
   assert.equal(remote?.children?.[0].workspaceRootDependency, true);
+});
+
+test('standardize reports workspace containers with non-member content without a fix', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rust-forge-container-'));
+  try {
+    await fs.writeFile(
+      path.join(root, 'Cargo.toml'),
+      '[workspace]\nmembers = ["crates/*"]\nresolver = "2"\n',
+    );
+    const crate = path.join(root, 'crates', 'app');
+    await fs.mkdir(path.join(crate, 'src'), { recursive: true });
+    await fs.writeFile(path.join(crate, 'Cargo.toml'), '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n');
+    await fs.writeFile(path.join(crate, 'src', 'lib.rs'), '');
+    await fs.writeFile(path.join(root, 'crates', 'README.md'), '# grouping notes\n');
+
+    const built = await buildModel(root);
+    const plan = await analyzeStandardization(built.model!);
+    const container = plan.findings.find((finding) => finding.id === 'container:crates');
+    assert.ok(container, 'container finding should exist');
+    assert.equal(container.fixable, false);
+    assert.deepEqual(container.changes, []);
+    assert.match(container.description, /README\.md/);
+
+    await fs.rm(path.join(root, 'crates', 'README.md'));
+    const clean = await analyzeStandardization((await buildModel(root)).model!);
+    assert.equal(clean.findings.some((finding) => finding.id === 'container:crates'), false);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });

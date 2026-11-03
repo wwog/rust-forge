@@ -66,11 +66,11 @@ export async function detectCrateTargets(
     typeof packageTable?.['default-run'] === 'string' ? packageTable['default-run'] : undefined;
   const autobins = packageTable?.autobins !== false;
   const binaries: CrateBinaryTarget[] = [];
+  // Cargo forbids two binary targets with the same name, so the name is the
+  // identity: a metadata target and an explicit `[[bin]]` entry for the same
+  // name describe the same target.
   const add = (target: CrateBinaryTarget) => {
-    const key = `${target.name}\0${target.path ?? ''}`;
-    if (!binaries.some((existing) => `${existing.name}\0${existing.path ?? ''}` === key)) {
-      binaries.push(target);
-    }
+    if (!binaries.some((existing) => existing.name === target.name)) binaries.push(target);
   };
 
   // Metadata is authoritative for explicit targets, but it can be stale when

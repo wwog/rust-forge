@@ -41,6 +41,8 @@ export interface AuditOptions {
   cacheHours?: number;
   timeoutMs?: number;
   cacheDir?: string;
+  /** Configured cargo binary; empty resolves `cargo` from PATH. */
+  cargoPath?: string;
 }
 
 interface CacheShape {
@@ -119,10 +121,16 @@ export class AuditService {
   }
 
   private async tryCargoAudit(root: string): Promise<AuditResult | undefined> {
-    const result: RunResult = await run('cargo', ['audit', '--json'], { cwd: root, timeoutMs: 120_000 });
+    const cargo = this.options.cargoPath?.trim() || 'cargo';
+    const result: RunResult = await run(cargo, ['audit', '--json'], { cwd: root, timeoutMs: 120_000 });
     if (result.missingBinary || result.code === 101 && /no such command/.test(result.stderr)) return undefined;
     try {
       const json = JSON.parse(result.stdout) as CargoAuditJson;
+      // cargo-audit prints `{"errors": [...]}` when the advisory database or
+      // the network fails; treating that as "no vulnerabilities" would report
+      // a clean audit and cache it for hours.
+      if (Array.isArray(json.errors) && json.errors.length) return undefined;
+      if (!json.vulnerabilities || !Array.isArray(json.vulnerabilities.list)) return undefined;
       const advisories = parseCargoAuditJson(json);
       return { source: 'cargo-audit', advisories, byPackage: indexAdvisories(advisories), fetchedAt: Date.now() };
     } catch {
@@ -175,15 +183,26 @@ export class AuditService {
         return { source: 'osv', advisories: [], byPackage: new Map(), fetchedAt: Date.now() };
       }
 
+      const versionsByAdvisory = new Map<string, Set<string>>();
+      for (const { id, version } of perQuery) {
+        if (!version) continue;
+        const versions = versionsByAdvisory.get(id) ?? new Set<string>();
+        versions.add(version);
+        versionsByAdvisory.set(id, versions);
+      }
+
       const details = await Promise.all([...ids].map((id) => this.fetchOsvDetails(id)));
       const advisories: Advisory[] = [];
       for (const detail of details) {
         if (!detail) continue;
+        // When the lockfile resolves exactly one version of the package, the
+        // advisory applies to that version; this lets the tree skip nodes at
+        // other, unaffected versions.
+        const versions = versionsByAdvisory.get(detail.id);
+        if (versions?.size === 1) detail.packageVersion = [...versions][0]!;
         advisories.push(detail);
       }
-      // Attach affected versions from the lockfile so severity lists match.
       const byPackage = indexAdvisories(advisories);
-      void perQuery;
       void root;
       return { source: 'osv', advisories, byPackage, fetchedAt: Date.now() };
     } catch {
@@ -236,6 +255,7 @@ export function indexAdvisories(advisories: Advisory[]): Map<string, Advisory[]>
 }
 
 interface CargoAuditJson {
+  errors?: unknown[];
   vulnerabilities?: {
     found?: boolean;
     list?: {

@@ -93,9 +93,14 @@ export class SnapshotStore {
     if (snapshot.files.some((f) => f.path === file)) return;
     try {
       const content = await fs.readFile(file, 'utf8');
+      // Recording the real content supersedes an earlier "created" marker.
+      snapshot.createdFiles = snapshot.createdFiles.filter((path) => path !== file);
       snapshot.files.push({ path: file, content });
-    } catch {
-      snapshot.createdFiles.push(file);
+    } catch (err) {
+      // Only a genuinely missing file should be deleted on rollback. Treating
+      // EACCES/EBUSY as "new" would delete the user's manifest.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      if (!snapshot.createdFiles.includes(file)) snapshot.createdFiles.push(file);
     }
   }
 
@@ -124,12 +129,27 @@ export class SnapshotStore {
 
   /** Persist the snapshot so it stays available for a later rollback. */
   async commit(snapshot: Snapshot): Promise<void> {
+    // The backup tree is only needed while a rollback is still possible.
+    await this.discardBackup(snapshot);
     await this.persist();
   }
 
   async discard(snapshot: Snapshot): Promise<void> {
     this.snapshots = this.snapshots.filter((s) => s.id !== snapshot.id);
     await this.persist();
+    await this.discardBackup(snapshot);
+  }
+
+  /** Remove the directory backup once the operation can no longer roll back. */
+  private async discardBackup(snapshot: Snapshot): Promise<void> {
+    if (!snapshot.backupPath) return;
+    const backupPath = snapshot.backupPath;
+    snapshot.backupPath = undefined;
+    try {
+      await fs.rm(backupPath, { recursive: true, force: true });
+    } catch {
+      // A leftover backup is harmless; never fail the operation over cleanup.
+    }
   }
 
   /**

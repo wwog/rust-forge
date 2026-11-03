@@ -539,7 +539,13 @@ function applyPropertyEdit(editor: TomlEditor, edit: PropertyEdit): ReturnType<T
   }
 
   if (edit.value === undefined) return editor.removeKey('package', edit.key);
-  return editor.setKey('package', edit.key, serializeForProperty(edit.key, edit.value));
+  // Writing a literal must also drop `key.workspace = true`; keeping both is
+  // invalid TOML (a table and a value under the same key).
+  const collected = [];
+  const inherited = editor.getKey('package', [edit.key, 'workspace']);
+  if (inherited) collected.push(...editor.removeKey('package', [edit.key, 'workspace']));
+  collected.push(...editor.setKey('package', edit.key, serializeForProperty(edit.key, edit.value)));
+  return collected;
 }
 
 const ARRAY_PROPERTY_KEYS = new Set(['authors', 'keywords', 'categories', 'exclude', 'include', 'members', 'default-members']);
@@ -569,7 +575,7 @@ function serializeForProperty(key: string, value: string): string {
 export function validateProperty(descriptor: PropertyDescriptor, value: string): string | undefined {
   const trimmed = value.trim();
   if (descriptor.type === 'version' && trimmed) {
-    if (!/^\d+\.\d+(\.\d+)?$/.test(trimmed)) {
+    if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?$/.test(trimmed)) {
       return t('"{0}" is not a valid Rust version (expected e.g. 1.75)', trimmed);
     }
   }
@@ -579,7 +585,11 @@ export function validateProperty(descriptor: PropertyDescriptor, value: string):
   if (descriptor.type === 'enum' && descriptor.values && trimmed && !descriptor.values.includes(trimmed)) {
     return t('{0} must be one of {1}.', trimmed, descriptor.values.join(', '));
   }
-  if (descriptor.key === 'version' && trimmed && !/^\d+\.\d+\.\d+/.test(trimmed)) {
+  if (
+    descriptor.key === 'version' &&
+    trimmed &&
+    !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(trimmed)
+  ) {
     return t('"{0}" is not a valid SemVer version', trimmed);
   }
   if (descriptor.key === 'name' && trimmed && !/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(trimmed)) {

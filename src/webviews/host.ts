@@ -37,6 +37,8 @@ export class WebviewPanelHost implements vscode.Disposable {
   private reloadTimer: NodeJS.Timeout | undefined;
   private lastData: PanelData | undefined;
   private ready = false;
+  /** Set after the first `ready`; later ones mean the page was reloaded. */
+  private readySeen = false;
   private disposed = false;
   private pending: HostMessage[] = [];
 
@@ -78,8 +80,15 @@ export class WebviewPanelHost implements vscode.Disposable {
     this.panel.webview.onDidReceiveMessage(
       async (message: WebviewMessage) => {
         if (message.type === 'ready') {
+          const reloaded = this.readySeen;
           this.ready = true;
+          this.readySeen = true;
           this.flush();
+          // A webview reload starts with an empty DOM. The pending queue was
+          // drained on the first load, so replay the current payload.
+          if (reloaded && this.lastData) {
+            void this.panel.webview.postMessage({ type: 'setData', data: this.lastData });
+          }
           return;
         }
         if (message.type === 'webviewError') {

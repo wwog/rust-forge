@@ -78,6 +78,63 @@ exclude = ["crates/skip-crate"]
   }
 });
 
+test('an ancestor exclude drops glob members like cargo', async () => {
+  const root = await makeWorkspace(`[workspace]
+members = ["crates/*"]
+exclude = ["crates"]
+`);
+  try {
+    await writeCrate(path.join(root, 'crates', 'foo'), 'foo');
+    await writeCrate(path.join(root, 'crates', 'bar'), 'bar');
+    const built = await buildModel(root);
+    assert.deepEqual(built.model!.members, []);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an explicit member bypasses exclude like cargo', async () => {
+  const root = await makeWorkspace(`[workspace]
+members = ["crates/foo"]
+exclude = ["crates"]
+`);
+  try {
+    await writeCrate(path.join(root, 'crates', 'foo'), 'foo');
+    const built = await buildModel(root);
+    assert.deepEqual(built.model!.members.map((member) => member.name), ['foo']);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a plain ancestor exclude reaches deeper glob members', async () => {
+  const root = await makeWorkspace(`[workspace]
+members = ["crates/*/*"]
+exclude = ["crates/group"]
+`);
+  try {
+    await writeCrate(path.join(root, 'crates', 'group', 'foo'), 'foo');
+    const built = await buildModel(root);
+    assert.deepEqual(built.model!.members, []);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a glob exclude only matches its own path', async () => {
+  const root = await makeWorkspace(`[workspace]
+members = ["crates/*/*"]
+exclude = ["crates/*"]
+`);
+  try {
+    await writeCrate(path.join(root, 'crates', 'group', 'foo'), 'foo');
+    const built = await buildModel(root);
+    assert.deepEqual(built.model!.members.map((member) => member.name), ['foo']);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('multi-segment member globs are expanded', async () => {
   const root = await makeWorkspace(`[workspace]
 members = ["crates/*/*"]

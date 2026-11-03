@@ -8,7 +8,7 @@
 import * as path from 'node:path';
 import { parse as parseToml } from 'smol-toml';
 import { TomlEditor, formatKeyPath, quoteString } from '../toml/editor.js';
-import type { DependencyDeclaration } from '../cargo/manifestDeps.js';
+import { declarationTablePath, type DependencyDeclaration } from '../cargo/manifestDeps.js';
 
 export interface InheritableField {
   key: string;
@@ -313,7 +313,13 @@ interface RewriteInput {
   promoted: Map<string, PromotedDependency>;
   readmeHandling: 'keep' | 'copy';
   lintsInherit: boolean;
-  pathRemaps: { name: string; table: 'dependencies' | 'dev-dependencies' | 'build-dependencies'; oldPath: string; newPath: string }[];
+  pathRemaps: {
+    name: string;
+    table: 'dependencies' | 'dev-dependencies' | 'build-dependencies';
+    target?: string;
+    oldPath: string;
+    newPath: string;
+  }[];
 }
 
 /** Swap the `path` value inside a dependency's inline table or table entry. */
@@ -362,16 +368,16 @@ function rewriteMemberManifest(input: RewriteInput): string {
     }
   }
 
-  // Recompute relative path dependencies for the deeper location.
-  for (const decl of input.pathRemaps) {
-    for (const table of ['dependencies', 'dev-dependencies', 'build-dependencies'] as const) {
-      if (decl.table !== table) continue;
-      if (!editor.hasKey(table, decl.name)) continue;
-      const value = editor.getValue(table, decl.name);
-      if (!value) continue;
-      const rewritten = remapPathInValue(value, decl.oldPath, decl.newPath);
-      if (rewritten) edits.push(...editor.setKey(table, decl.name, rewritten));
-    }
+  // Recompute relative path dependencies for the deeper location. Target
+  // specific tables must be addressed separately: the same dependency name can
+  // appear in both `[dependencies]` and `[target.'cfg(...)'.dependencies]`.
+  for (const remap of input.pathRemaps) {
+    const table = declarationTablePath({ table: remap.table, target: remap.target });
+    if (!editor.hasKey(table, remap.name)) continue;
+    const value = editor.getValue(table, remap.name);
+    if (!value) continue;
+    const rewritten = remapPathInValue(value, remap.oldPath, remap.newPath);
+    if (rewritten) edits.push(...editor.setKey(table, remap.name, rewritten));
   }
 
   if (input.lintsInherit) {
@@ -438,7 +444,13 @@ function collectDeclarations(text: string): DependencyDeclaration[] {
 function computePathRemaps(
   decls: DependencyDeclaration[],
   input: MigrationPlanInput,
-): { name: string; table: 'dependencies' | 'dev-dependencies' | 'build-dependencies'; oldPath: string; newPath: string }[] {
+): {
+  name: string;
+  table: 'dependencies' | 'dev-dependencies' | 'build-dependencies';
+  target?: string;
+  oldPath: string;
+  newPath: string;
+}[] {
   if (!input.workspaceRoot || !input.packageDir || !input.targetDir) return [];
   const remaps: ReturnType<typeof computePathRemaps> = [];
   for (const decl of decls) {
@@ -452,7 +464,13 @@ function computePathRemaps(
     }
     const newRelative = path.relative(input.targetDir, absolute).split(path.sep).join('/');
     if (newRelative !== decl.path) {
-      remaps.push({ name: decl.key, table: decl.table, oldPath: decl.path, newPath: newRelative || '.' });
+      remaps.push({
+        name: decl.key,
+        table: decl.table,
+        target: decl.target,
+        oldPath: decl.path,
+        newPath: newRelative || '.',
+      });
     }
   }
   return remaps;

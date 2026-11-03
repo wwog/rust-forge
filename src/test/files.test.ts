@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { compileGlob, isPathExcluded, sortEntries } from '../core/files.js';
+import {
+  compileGlob,
+  isPathExcluded,
+  sortEntries,
+  unexpectedContainerEntries,
+  workspaceContainers,
+} from '../core/files.js';
 
 test('sorts folders first with natural number order', () => {
   const entries = [
@@ -41,6 +47,25 @@ test('hides paths matched by files.exclude patterns', () => {
   assert.equal(isPathExcluded('node_modules', defaults), true);
   assert.equal(isPathExcluded('node_modules/serde/index.js', defaults), true);
   assert.equal(isPathExcluded('src/main.rs', defaults), false);
+});
+
+test('groups members by root container and keeps only stray entries', () => {
+  const containers = workspaceContainers('/ws', [
+    '/ws',
+    '/ws/crates/app',
+    '/ws/crates/group/tool',
+    '/ws/tools/x',
+  ]);
+  assert.deepEqual(containers.map((container) => container.name), ['crates', 'tools']);
+  const container = containers[0]!;
+  assert.deepEqual([...container.memberChildren].sort(), ['app', 'group']);
+  const stray = unexpectedContainerEntries(container, [
+    { name: 'app', isDirectory: true },
+    { name: 'group', isDirectory: true },
+    { name: 'README.md', isDirectory: false },
+    { name: 'scripts', isDirectory: true },
+  ]);
+  assert.deepEqual(stray.map((entry) => entry.name), ['README.md', 'scripts']);
 });
 
 test('handles brace alternation and directory-only patterns', () => {

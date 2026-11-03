@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 import { renderShell, WebviewPanelHost } from '../../webviews/host.js';
 import { DependencyTreeProvider } from '../../views/dependencyTree.js';
 import { ProjectTreeProvider } from '../../views/projectTree.js';
+import { ToolchainTreeProvider } from '../../views/toolchainTree.js';
 
 /**
  * Integration checks that run inside a real Extension Development Host.
@@ -32,6 +33,10 @@ export async function run(): Promise<void> {
       'rustForge.createProject',
       'rustForge.installDependency',
       'rustForge.upgradeDependencies',
+      'rustForge.upgradeAllSafe',
+      'rustForge.workspaceTopology',
+      'rustForge.moveMember',
+      'rustForge.promoteDependencyToWorkspace',
       'rustForge.editProperties',
       'rustForge.editRustfmt',
       'rustForge.standardize',
@@ -144,6 +149,30 @@ export async function run(): Promise<void> {
     assert.match(String(provider.getTreeItem(remoteDeps[0]).contextValue), /workspaceRootDependency/);
   });
 
+  await test('views show loading and error rows instead of the create-project welcome', async () => {
+    const loading = { phase: 'loading', errors: [] } as never;
+
+    const deps = new DependencyTreeProvider(loading);
+    const depRows = deps.getChildren() as never[];
+    assert.equal(depRows.length, 1, 'dependency view should show exactly one loading row');
+    const depItem = deps.getTreeItem(depRows[0]);
+    assert.equal(depItem.contextValue, 'status:loading');
+    assert.equal(depItem.collapsibleState, vscode.TreeItemCollapsibleState.None);
+
+    const toolchain = new ToolchainTreeProvider(loading);
+    const tcRows = toolchain.getChildren() as never[];
+    assert.equal(tcRows.length, 1, 'toolchain view should show exactly one loading row');
+    assert.equal(toolchain.getTreeItem(tcRows[0]).contextValue, 'status:loading');
+
+    const failed = new DependencyTreeProvider({ phase: 'error', errors: ['manifest is invalid'] } as never);
+    const failedRows = failed.getChildren() as never[];
+    assert.equal(failedRows.length, 1, 'failed view should show an error row');
+    const failedItem = failed.getTreeItem(failedRows[0]);
+    assert.equal(failedItem.contextValue, 'status:error');
+    assert.equal(failedItem.command?.command, 'rustForge.refresh');
+    assert.match(String(failedItem.tooltip), /manifest is invalid/);
+  });
+
   await test('project views are contributed', async () => {
     const pkg = vscode.extensions.getExtension('rust-forge.rust-forge')!.packageJSON as {
       contributes: { views: Record<string, { id: string }[]> };
@@ -254,6 +283,7 @@ export async function run(): Promise<void> {
     ['rustForge.standardize', 1500],
     ['rustForge.convertToWorkspace', 2000],
     ['rustForge.dependencyHealth', 2500],
+    ['rustForge.workspaceTopology', 1500],
   ] as [string, number][]) {
     await test(`${command} opens without throwing`, async () => {
       await vscode.commands.executeCommand(command);

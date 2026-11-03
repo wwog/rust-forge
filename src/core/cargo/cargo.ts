@@ -10,19 +10,18 @@ export interface CargoServiceOptions {
 }
 
 /**
- * Build `cargo update` arguments from `name@version` specs.
+ * Build the `cargo update` arguments for one `name@version` spec.
  *
  * A bare `name@version` is a package *selection* and fails when that exact
  * version is not already in the lockfile; refreshing a lock-only upgrade needs
- * `-p name --precise version`.
+ * `-p name --precise version`. Cargo accepts only one `--precise` per
+ * invocation, so callers must run one command per spec.
  */
-export function updateArgs(specs: string[]): string[] {
+export function updateArgs(spec: string): string[] {
   const args = ['update'];
-  for (const spec of specs) {
-    const at = spec.lastIndexOf('@');
-    if (at > 0) args.push('-p', spec.slice(0, at), '--precise', spec.slice(at + 1));
-    else args.push(spec);
-  }
+  const at = spec.lastIndexOf('@');
+  if (at > 0) args.push('-p', spec.slice(0, at), '--precise', spec.slice(at + 1));
+  else args.push(spec);
   return args;
 }
 
@@ -96,7 +95,56 @@ export class CargoService {
   }
 
   async update(cwd: string, specs: string[], overrides: Partial<RunOptions> = {}): Promise<RunResult> {
-    return this.exec(updateArgs(specs), cwd, { timeoutMs: 600_000, ...overrides });
+    if (specs.length <= 1) {
+      return this.exec(updateArgs(specs[0] ?? ''), cwd, { timeoutMs: 600_000, ...overrides });
+    }
+    // `--precise` may only appear once per invocation, so refresh each package
+    // separately and merge the results.
+    const results: RunResult[] = [];
+    for (const spec of specs) {
+      results.push(await this.exec(updateArgs(spec), cwd, { timeoutMs: 600_000, ...overrides }));
+    }
+    return mergeRunResults(results);
+  }
+
+  /**
+   * Refresh one or more packages in Cargo.lock without pinning an exact
+   * version. Used after a manifest rewrite, where the new requirement already
+   * constrains the resolution and `--precise` would fight it.
+   */
+  async refreshPackages(cwd: string, names: string[], overrides: Partial<RunOptions> = {}): Promise<RunResult> {
+    const unique = [...new Set(names.map((name) => name.trim()).filter(Boolean))];
+    if (!unique.length) return emptyRunResult('cargo update');
+    const args = ['update'];
+    for (const name of unique) args.push('-p', name);
+    return this.exec(args, cwd, { timeoutMs: 600_000, ...overrides });
+  }
+
+  /**
+   * Pin each spec to an exact version. Cargo accepts one `--precise` per
+   * invocation, so this runs one command per spec and merges the results.
+   */
+  async updatePrecise(
+    cwd: string,
+    specs: { name: string; targetVersion: string }[],
+    overrides: Partial<RunOptions> = {},
+  ): Promise<RunResult> {
+    const unique = new Map<string, { name: string; targetVersion: string }>();
+    for (const spec of specs) {
+      if (!spec.name || !spec.targetVersion) continue;
+      unique.set(`${spec.name}@${spec.targetVersion}`, spec);
+    }
+    if (!unique.size) return emptyRunResult('cargo update');
+    const results: RunResult[] = [];
+    for (const spec of unique.values()) {
+      results.push(
+        await this.exec(['update', '-p', spec.name, '--precise', spec.targetVersion], cwd, {
+          timeoutMs: 600_000,
+          ...overrides,
+        }),
+      );
+    }
+    return mergeRunResults(results);
   }
 
   async fmtCheck(cwd: string, overrides: Partial<RunOptions> = {}): Promise<RunResult> {
@@ -138,7 +186,8 @@ export class CargoService {
     if (spec.table === 'dev-dependencies') args.push('--dev');
     if (spec.table === 'build-dependencies') args.push('--build');
     if (spec.features?.length) args.push('--features', spec.features.join(','));
-    if (spec.optional) args.push('--optional');
+    // Cargo rejects `--optional` together with `--dev`.
+    if (spec.optional && spec.table !== 'dev-dependencies') args.push('--optional');
     if (spec.noDefaultFeatures) args.push('--no-default-features');
     if (spec.path) args.push('--path', spec.path);
     return this.exec(args, cwd, { timeoutMs: 300_000, ...overrides });
@@ -155,4 +204,24 @@ export class CargoService {
 
 export function lockfileFor(root: string): string {
   return path.join(root, 'Cargo.lock');
+}
+
+/** Merge per-package `cargo update` runs into one result. */
+function mergeRunResults(results: RunResult[]): RunResult {
+  const failed = results.find((result) => result.code !== 0);
+  return {
+    code: failed?.code ?? 0,
+    stdout: results.map((result) => result.stdout).filter(Boolean).join('\n'),
+    stderr: results.map((result) => result.stderr).filter(Boolean).join('\n'),
+    command: results.map((result) => result.command).join(' && '),
+    durationMs: results.reduce((total, result) => total + result.durationMs, 0),
+    missingBinary: results.some((result) => result.missingBinary),
+    timedOut: results.some((result) => result.timedOut),
+    cancelled: results.some((result) => result.cancelled),
+  };
+}
+
+/** A no-op success, used when there is nothing to refresh. */
+function emptyRunResult(command: string): RunResult {
+  return { code: 0, stdout: '', stderr: '', command, durationMs: 0 };
 }

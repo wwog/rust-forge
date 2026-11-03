@@ -2,7 +2,7 @@
   "name": "rust-forge",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "publisher": "rust-forge",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -191,6 +191,28 @@
         "icon": "$(arrow-up)"
       },
       {
+        "command": "rustForge.upgradeAllSafe",
+        "title": "%command.upgradeAllSafe%",
+        "category": "Rust Forge",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "rustForge.workspaceTopology",
+        "title": "%command.workspaceTopology%",
+        "category": "Rust Forge",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
+        "command": "rustForge.moveMember",
+        "title": "%command.moveMember%",
+        "category": "Rust Forge"
+      },
+      {
+        "command": "rustForge.promoteDependencyToWorkspace",
+        "title": "%command.promoteDependencyToWorkspace%",
+        "category": "Rust Forge"
+      },
+      {
         "command": "rustForge.upgradeDependency",
         "title": "%command.upgradeDependency%",
         "category": "Rust Forge"
@@ -284,7 +306,7 @@
       "view/title": [
         {
           "command": "rustForge.createProject",
-          "when": "view == rustForge.project && !rustForge.hasProject",
+          "when": "view == rustForge.project && !rustForge.hasProject && !rustForge.loading",
           "group": "navigation@1"
         },
         {
@@ -313,6 +335,11 @@
           "group": "navigation@5"
         },
         {
+          "command": "rustForge.workspaceTopology",
+          "when": "view == rustForge.project && rustForge.isWorkspace",
+          "group": "navigation@6"
+        },
+        {
           "command": "rustForge.installDependency",
           "when": "view == rustForge.dependencies && rustForge.hasProject",
           "group": "navigation@1"
@@ -320,17 +347,22 @@
         {
           "command": "rustForge.upgradeDependencies",
           "when": "view == rustForge.dependencies && rustForge.hasProject",
+          "group": "navigation@3"
+        },
+        {
+          "command": "rustForge.upgradeAllSafe",
+          "when": "view == rustForge.dependencies && rustForge.hasProject",
           "group": "navigation@2"
         },
         {
           "command": "rustForge.refreshAudit",
           "when": "view == rustForge.dependencies && rustForge.hasProject",
-          "group": "navigation@4"
+          "group": "navigation@5"
         },
         {
           "command": "rustForge.dependencyHealth",
           "when": "view == rustForge.dependencies && rustForge.hasProject",
-          "group": "navigation@3"
+          "group": "navigation@4"
         },
         {
           "command": "rustForge.refresh",
@@ -392,6 +424,11 @@
         {
           "command": "rustForge.removeMember",
           "when": "view == rustForge.project && viewItem =~ /^member(:|$)/",
+          "group": "1_modification@2"
+        },
+        {
+          "command": "rustForge.moveMember",
+          "when": "view == rustForge.project && viewItem =~ /^member(:|$)/",
           "group": "1_modification@1"
         },
         {
@@ -432,6 +469,11 @@
         {
           "command": "rustForge.addWorkspaceDependencyToMember",
           "when": "view == rustForge.dependencies && viewItem =~ /workspaceRootDependency/",
+          "group": "1_modification@1"
+        },
+        {
+          "command": "rustForge.promoteDependencyToWorkspace",
+          "when": "view == rustForge.dependencies && viewItem =~ /promotable/",
           "group": "1_modification@1"
         },
         {
@@ -491,6 +533,14 @@
         },
         {
           "command": "rustForge.openDependencyManifest",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.moveMember",
+          "when": "false"
+        },
+        {
+          "command": "rustForge.promoteDependencyToWorkspace",
           "when": "false"
         }
       ]

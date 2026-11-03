@@ -10,8 +10,11 @@ export function renderUpgrade(data: UpgradePanelData): HTMLElement {
 
   root.appendChild(el('h1', {}, t('Review safe upgrades')));
   root.appendChild(
-    el('p', { class: 'subtitle' }, t('Safe updates stay within the declared requirement without changing features. Major versions are listed separately and are not selected.')),
+    el('p', { class: 'subtitle' }, t('Safe updates are Cargo-compatible and require no major-version review. Requirement, feature-set and MSRV changes are shown for each row.')),
   );
+  if (data.toolchainVersion) {
+    root.appendChild(el('p', { class: 'muted' }, t('Active toolchain: Rust {0}', data.toolchainVersion)));
+  }
 
   if (data.registryDegraded) {
     root.appendChild(
@@ -20,11 +23,13 @@ export function renderUpgrade(data: UpgradePanelData): HTMLElement {
   }
 
   const safe = data.rows.filter((row) => row.classification === 'safe' && row.latest);
+  // MSRV-violating rows stay visible but must never be applied silently.
+  const selectableSafe = safe.filter((row) => !row.msrvViolated);
   const major = data.rows.filter((row) => row.classification === 'major');
   const blocked = data.rows.filter((row) => row.classification === 'unknown');
   const current = data.rows.filter((row) => row.classification === 'not-applicable');
 
-  for (const row of safe) selected.add(row.id);
+  for (const row of selectableSafe) selected.add(row.id);
 
   if (!data.rows.length) {
     root.appendChild(emptyState('check', t('Nothing to review'), el('div', {}, t('No declared registry dependencies were found.'))));
@@ -63,19 +68,22 @@ export function renderUpgrade(data: UpgradePanelData): HTMLElement {
   const foot = footer(el('span', { class: 'hint', id: 'upgrade-hint' }, ''));
   foot.appendChild(el('div', { class: 'spacer' }));
   foot.appendChild(button(t('Select all safe'), () => {
-    for (const row of safe) selected.add(row.id);
+    for (const row of selectableSafe) selected.add(row.id);
     render();
   }, { secondary: true }));
   foot.appendChild(button(t('Clear selection'), () => {
     selected.clear();
     render();
   }, { secondary: true }));
+  foot.appendChild(button(t('Upgrade all safe'), () => {
+    send({ type: 'upgradeAllSafe' });
+  }, { icon: 'arrow-up', disabled: !selectableSafe.length }));
   foot.appendChild(button(t('Apply selected'), () => {
     if (!selected.size) {
       return;
     }
     send({ type: 'upgradeSelected', ids: [...selected] });
-  }, { icon: 'arrow-up' }));
+  }, { icon: 'check' }));
   root.appendChild(foot);
 
   const hint = foot.querySelector<HTMLElement>('#upgrade-hint')!;
@@ -131,19 +139,70 @@ export function renderUpgrade(data: UpgradePanelData): HTMLElement {
     head.appendChild(badge(classificationLabel(row.classification), row.classification === 'safe' ? 'safe' : row.classification === 'major' ? 'major' : 'unknown'));
     if (row.optional) head.appendChild(badge(t('optional'), 'none'));
     if (row.isWorkspaceDependency) head.appendChild(badge(t('workspace'), 'accent'));
+    if (row.changeMode === 'lock-only') head.appendChild(badge(t('lockfile only'), 'accent'));
+    if (row.msrvViolated) head.appendChild(badge(t('needs newer Rust'), 'danger'));
     if (row.advisories.length) {
       head.appendChild(badge(t('⚠ {0} advisory', row.advisories.length), 'danger'));
     }
     cardEl.appendChild(head);
 
     const meta = el('div', { class: 'card-meta' });
-    meta.appendChild(el('span', { class: 'mono' }, row.requirement ?? t('any')));
+    if (row.changeMode === 'manifest' && row.requirementAfter && row.requirementAfter !== row.requirement) {
+      meta.appendChild(el('span', { class: 'mono' }, `${row.requirement ?? t('any')} → ${row.requirementAfter}`));
+    } else {
+      meta.appendChild(el('span', { class: 'mono' }, row.requirement ?? t('any')));
+    }
     if (row.locked) meta.appendChild(el('span', {}, '→', el('span', { class: 'mono' }, row.locked)));
     if (row.latest) meta.appendChild(el('span', {}, '↑', el('span', { class: 'mono' }, row.latest)));
     meta.appendChild(el('span', {}, row.member));
     meta.appendChild(el('span', { class: 'mono muted' }, shortPath(row.table)));
     if (row.features.length) meta.appendChild(el('span', {}, t('features: {0}', row.features.join(', '))));
+    if (row.targetRustVersion) {
+      meta.appendChild(el('span', { class: 'muted' }, t('requires Rust {0}', row.targetRustVersion)));
+    }
     cardEl.appendChild(meta);
+
+    if (row.changeMode === 'lock-only') {
+      cardEl.appendChild(
+        el('div', { class: 'field-desc' }, t('The declared requirement already allows this version, so only Cargo.lock is refreshed.')),
+      );
+    }
+    if (
+      row.featureChange &&
+      (row.featureChange.added.length || row.featureChange.removed.length || row.featureChange.defaultChanged)
+    ) {
+      const featureRow = el('div', { class: 'row tight', style: 'margin-top:6px' });
+      featureRow.appendChild(el('span', { class: 'muted' }, t('Feature changes')));
+      for (const feature of row.featureChange.added) featureRow.appendChild(badge(`+${feature}`, 'accent'));
+      for (const feature of row.featureChange.removed) featureRow.appendChild(badge(`−${feature}`, 'none'));
+      if (row.featureChange.defaultChanged) featureRow.appendChild(badge(t('default features changed'), 'unknown'));
+      cardEl.appendChild(featureRow);
+      if (row.featureChange.defaultChanged) {
+        cardEl.appendChild(
+          el('div', { class: 'field-desc' }, t('The default feature set differs from the locked release.')),
+        );
+      }
+    }
+    if (row.msrvViolated) {
+      cardEl.appendChild(
+        banner(
+          'warning',
+          el(
+            'div',
+            {},
+            t(
+              'This release requires Rust {0}, but the active toolchain is {1}.',
+              row.targetRustVersion ?? '',
+              data.toolchainVersion ?? t('unknown'),
+            ),
+          ),
+        ),
+      );
+    } else if (row.msrvUnknown && row.latest) {
+      cardEl.appendChild(
+        el('div', { class: 'field-desc' }, t('This release does not declare a rust-version; the minimum compiler version is unknown.')),
+      );
+    }
 
     if (row.reason === 'features-changed') {
       cardEl.appendChild(el('div', { class: 'field-desc' }, t('The newer version changes its default feature set; enabling it could alter the build.')));

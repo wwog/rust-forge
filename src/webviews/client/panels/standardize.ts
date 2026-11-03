@@ -24,18 +24,24 @@ export function renderStandardize(data: StandardizePanelData): HTMLElement {
   const previewHost = el('div', { style: 'margin-top:12px' });
 
   for (const finding of data.findings) {
-    const card = el('div', { class: 'card selectable' });
+    // Non-fixable findings are informational notices; they have no checkbox
+    // and are never part of the applied batch.
+    const card = el('div', { class: finding.fixable ? 'card selectable' : 'card' });
     const head = el('div', { class: 'card-title' });
-    const box = el('vscode-checkbox', selected.has(finding.id) ? { checked: true } : {}) as unknown as HTMLElement;
-    box.addEventListener('click', (event) => event.stopPropagation());
-    box.addEventListener('change', (event) => {
-      const checked = (event.target as unknown as { checked: boolean }).checked;
-      if (checked) selected.add(finding.id);
-      else selected.delete(finding.id);
-      card.classList.toggle('selected', checked);
-      updateHint();
-    });
-    head.appendChild(box);
+    if (finding.fixable) {
+      const box = el('vscode-checkbox', selected.has(finding.id) ? { checked: true } : {}) as unknown as HTMLElement;
+      box.addEventListener('click', (event) => event.stopPropagation());
+      box.addEventListener('change', (event) => {
+        const checked = (event.target as unknown as { checked: boolean }).checked;
+        if (checked) selected.add(finding.id);
+        else selected.delete(finding.id);
+        card.classList.toggle('selected', checked);
+        updateHint();
+      });
+      head.appendChild(box);
+    } else {
+      head.appendChild(badge(t('No automatic fix'), 'none'));
+    }
     head.appendChild(el('span', {}, finding.title));
     card.appendChild(head);
     card.appendChild(el('div', { class: 'field-desc' }, finding.description));
@@ -46,15 +52,23 @@ export function renderStandardize(data: StandardizePanelData): HTMLElement {
     }
     if (files.childElementCount) card.appendChild(files);
 
-    card.addEventListener('click', () => {
-      if (selected.has(finding.id)) selected.delete(finding.id);
-      else selected.add(finding.id);
-      const now = selected.has(finding.id);
-      card.classList.toggle('selected', now);
-      (box as unknown as { checked: boolean }).checked = now;
-      updateHint();
-    });
+    if (finding.fixable) {
+      const box = head.querySelector('vscode-checkbox') as unknown as { checked: boolean } | null;
+      card.addEventListener('click', () => {
+        if (selected.has(finding.id)) selected.delete(finding.id);
+        else selected.add(finding.id);
+        const now = selected.has(finding.id);
+        card.classList.toggle('selected', now);
+        if (box) box.checked = now;
+        updateHint();
+      });
+    }
     root.appendChild(card);
+  }
+
+  if (!data.findings.some((finding) => finding.fixable)) {
+    root.appendChild(footer(...[el('div', { class: 'spacer' }), button(t('Close'), () => send({ type: 'close' }), { secondary: true })]));
+    return root;
   }
 
   root.appendChild(section(t('Preview'), previewHost));

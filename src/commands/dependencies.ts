@@ -1,21 +1,38 @@
 /** Dependency install and upgrade commands, including webview wiring. */
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import type { ProjectController } from '../projectController.js';
+import type { ProjectController, ProjectSnapshot } from '../projectController.js';
 import type { Services } from '../services.js';
 import type { DependencyTable } from '../core/cargo/types.js';
-import { declarationTablePath, parseDependencies, readDependencies } from '../core/cargo/manifestDeps.js';
+import {
+  declarationTablePath,
+  parseDependencies,
+  readDependencies,
+  readWorkspaceDependencies,
+} from '../core/cargo/manifestDeps.js';
 import { readLockfile } from '../core/cargo/lockfile.js';
 import { parseVersionReq, requirementSatisfied } from '../core/deps/versions.js';
 import { crateDocsUrl, latestStableVersion, type CrateDetail } from '../core/deps/registry.js';
-import { checkLockBeforeInstall, planInstall, planUpgrades, resolveRequestedRequirement, workspaceReferenceValue, type InstallRequest, type UpgradeEdit } from '../core/deps/write.js';
+import {
+  checkLockBeforeInstall,
+  hasDependency,
+  planInstall,
+  planRemove,
+  planUpgrades,
+  resolveRequestedRequirement,
+  workspaceReferenceValue,
+  type InstallRequest,
+  type UpgradeEdit,
+} from '../core/deps/write.js';
+import { changeModeFor, compareTargetMsrv, isSafeUpgradeEligible } from '../core/deps/upgradePlan.js';
 import type { DependencyNode } from '../core/deps/tree.js';
 import { buildModel } from '../core/cargo/project.js';
 import { readTextFile } from '../core/process.js';
 import { TomlEditor } from '../core/toml/editor.js';
 import { readSettings } from '../settings.js';
 import { t } from '../core/i18n.js';
-import { writeFilesWithVerification } from './shared.js';
+import { confirmWithDiffs, log, writeFilesWithVerification } from './shared.js';
+import { formatReport, verify, type VerificationReport } from '../core/verify.js';
 import { WebviewPanelHost } from '../webviews/host.js';
 import type { CrateDetailData, DependencyRow, InstallPanelData, UpgradePanelData, WebviewMessage } from '../webviews/protocol.js';
 
@@ -197,13 +214,13 @@ async function performInstall(
   const existing: string[] = [];
   if (workspaceMode) {
     const rootText = texts.get(model.manifestPath);
-    if (rootText && new TomlEditor(rootText).hasKey('workspace.dependencies', request.packageName)) {
+    if (rootText && hasDependency(rootText, 'workspace.dependencies', request.packageName)) {
       existing.push('[workspace.dependencies]');
     }
   }
   for (const target of targets) {
     const text = texts.get(target.manifestPath);
-    if (text && new TomlEditor(text).hasKey(request.table, request.packageName)) existing.push(target.name);
+    if (text && hasDependency(text, request.table, request.packageName)) existing.push(target.name);
   }
   if (existing.length) {
     const overwrite = await vscode.window.showWarningMessage(
@@ -285,9 +302,10 @@ export async function upgradeDependenciesCommand(
 
   const buildData = (using: typeof snapshot = controller.snapshot ?? snapshot): UpgradePanelData => ({
     kind: 'upgrade-panel',
-    rows: buildUpgradeRows(using.depTree.root),
+    rows: buildUpgradeRows(using.depTree.root, using.toolchain.rustcVersion),
     registryDegraded: using.depTree.registryDegraded,
     workspace: using.model.kind === 'workspace',
+    toolchainVersion: using.toolchain.rustcVersion,
   });
   const data = buildData();
 
@@ -312,6 +330,9 @@ export async function upgradeDependenciesCommand(
         case 'upgradeSelected':
           await applyUpgrades(controller, services, host, message.ids);
           break;
+        case 'upgradeAllSafe':
+          await applyAllSafe(controller, services, host);
+          break;
         case 'runCommand':
           await vscode.commands.executeCommand(message.command, ...(message.args ?? []));
           break;
@@ -325,12 +346,79 @@ export async function upgradeDependenciesCommand(
   });
 }
 
-function buildUpgradeRows(root: DependencyNode): DependencyRow[] {
+/**
+ * One-click "Upgrade all safe" command.
+ *
+ * Selects every row that is classified safe and not blocked by the active
+ * toolchain's MSRV, then runs the exact same apply pipeline as the panel
+ * (diffs, modal confirmation, write + verify + lockfile refresh).
+ */
+export async function upgradeAllSafeCommand(
+  controller: ProjectController,
+  services: Services,
+  extensionUri: vscode.Uri,
+): Promise<void> {
+  // The parameter keeps the command signature aligned with the other
+  // commands; this path does not open a webview panel.
+  void extensionUri;
+  const snapshot = controller.snapshot;
+  if (!snapshot) {
+    void vscode.window.showInformationMessage(t('Open a Rust project first.'));
+    return;
+  }
+  const nodes = eligibleSafeNodes(snapshot);
+  if (!nodes.length) {
+    void vscode.window.showInformationMessage(t('No safe upgrades are available.'));
+    return;
+  }
+  await applyUpgradeNodes(controller, services, windowNotifier, nodes);
+}
+
+async function applyAllSafe(
+  controller: ProjectController,
+  services: Services,
+  host: WebviewPanelHost,
+): Promise<void> {
+  const snapshot = controller.snapshot;
+  if (!snapshot) return;
+  const nodes = eligibleSafeNodes(snapshot);
+  if (!nodes.length) {
+    host.toast(t('No safe upgrades are available.'), 'warning');
+    return;
+  }
+  await applyUpgradeNodes(controller, services, panelNotifier(host), nodes);
+}
+
+/** Safe rows the batch action may include; unknown MSRV stays eligible. */
+function eligibleSafeNodes(snapshot: ProjectSnapshot): DependencyNode[] {
+  const toolchainVersion = snapshot.toolchain.rustcVersion;
+  const result: DependencyNode[] = [];
+  // Walk the same tree the panel renders so workspace-table-only dependencies
+  // (which are not in `depTree.upgradable`) are included too.
+  const visit = (node: DependencyNode) => {
+    if (
+      (node.kind === 'dependency' || node.kind === 'localDependency') &&
+      node.upgrade &&
+      node.declaration &&
+      node.latestVersion
+    ) {
+      const msrv = compareTargetMsrv(node.targetRustVersion, toolchainVersion);
+      if (isSafeUpgradeEligible({ classification: node.upgrade.classification, msrvViolated: msrv.violated })) {
+        result.push(node);
+      }
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  visit(snapshot.depTree.root);
+  return result;
+}
+
+function buildUpgradeRows(root: DependencyNode, toolchainVersion?: string): DependencyRow[] {
   const rows: DependencyRow[] = [];
   const visit = (node: DependencyNode) => {
     if (node.kind === 'dependency' || node.kind === 'localDependency') {
       if (node.upgrade && node.declaration) {
-        rows.push(toRow(node));
+        rows.push(toRow(node, toolchainVersion));
       }
     }
     for (const child of node.children ?? []) visit(child);
@@ -339,7 +427,9 @@ function buildUpgradeRows(root: DependencyNode): DependencyRow[] {
   return rows;
 }
 
-function toRow(node: DependencyNode): DependencyRow {
+function toRow(node: DependencyNode, toolchainVersion?: string): DependencyRow {
+  const upgrade = node.upgrade;
+  const msrv = compareTargetMsrv(node.targetRustVersion, toolchainVersion);
   return {
     id: node.id,
     label: node.label,
@@ -348,8 +438,8 @@ function toRow(node: DependencyNode): DependencyRow {
     requirement: node.requirement,
     locked: node.lockedVersion,
     latest: node.latestVersion,
-    classification: node.upgrade?.classification ?? 'not-applicable',
-    reason: node.upgrade?.reason,
+    classification: upgrade?.classification ?? 'not-applicable',
+    reason: upgrade?.reason,
     features: node.features ?? [],
     optional: !!node.optional,
     advisories: node.advisories.map((a) => ({
@@ -362,8 +452,37 @@ function toRow(node: DependencyNode): DependencyRow {
     registryUnavailable: !!node.registryUnavailable,
     isWorkspaceDependency: !!node.isWorkspaceDependency,
     table: node.table ?? 'dependencies',
+    requirementAfter: upgrade?.newRequirement ?? node.requirement,
+    changeMode: changeModeFor(node.requirement, upgrade),
+    featureChange: node.featureChange,
+    targetRustVersion: node.targetRustVersion,
+    lockedRustVersion: node.lockedRustVersion,
+    msrvViolated: msrv.violated || undefined,
+    msrvUnknown: msrv.unknown || undefined,
   };
 }
+
+interface UpgradeNotifier {
+  busy(active: boolean, label?: string): void;
+  toast(message: string, level: 'info' | 'warning' | 'error' | 'success'): void;
+}
+
+function panelNotifier(host: WebviewPanelHost): UpgradeNotifier {
+  return {
+    busy: (active, label) => host.busy(active, label),
+    toast: (message, level) => host.toast(message, level),
+  };
+}
+
+/** Fallback feedback for commands that run without a webview panel. */
+const windowNotifier: UpgradeNotifier = {
+  busy: () => {},
+  toast: (message, level) => {
+    if (level === 'error') void vscode.window.showErrorMessage(message);
+    else if (level === 'warning') void vscode.window.showWarningMessage(message);
+    else void vscode.window.showInformationMessage(message);
+  },
+};
 
 async function applyUpgrades(
   controller: ProjectController,
@@ -371,9 +490,6 @@ async function applyUpgrades(
   host: WebviewPanelHost,
   ids: string[],
 ): Promise<void> {
-  const snapshot = controller.snapshot;
-  if (!snapshot) return;
-
   const nodes = ids
     .map((id) => controller.findDependencyNode(id))
     .filter((node): node is DependencyNode => !!node && !!node.upgrade && !!node.declaration);
@@ -381,24 +497,61 @@ async function applyUpgrades(
     host.toast(t('Nothing to upgrade.'), 'warning');
     return;
   }
+  await applyUpgradeNodes(controller, services, panelNotifier(host), nodes);
+}
+
+/**
+ * Shared apply pipeline for the panel and the one-click command.
+ *
+ * Manifests are only rewritten when the requirement text changes; rows whose
+ * requirement already admits the target are refreshed in Cargo.lock alone.
+ */
+async function applyUpgradeNodes(
+  controller: ProjectController,
+  services: Services,
+  notifier: UpgradeNotifier,
+  nodes: DependencyNode[],
+): Promise<void> {
+  const snapshot = controller.snapshot;
+  if (!snapshot) return;
 
   const model = snapshot.model;
   const texts = new Map<string, string>();
   const edits: UpgradeEdit[] = [];
   const notes: string[] = [];
 
+  const ensureText = async (file: string): Promise<string | undefined> => {
+    const cached = texts.get(file);
+    if (cached !== undefined) return cached;
+    try {
+      const text = await readTextFile(file);
+      texts.set(file, text);
+      return text;
+    } catch {
+      return undefined;
+    }
+  };
+
   for (const node of nodes) {
+    const upgrade = node.upgrade;
+    const declaration = node.declaration;
     const target = node.latestVersion;
-    const declaration = node.declaration!;
-    const upgrade = node.upgrade!;
-    if (!target) continue;
+    if (!upgrade || !declaration || !target) continue;
+    if (changeModeFor(node.requirement, upgrade) === 'none') continue;
 
     if (declaration.kind === 'workspace' && model.kind === 'workspace') {
       // Rewrite the workspace table, not the member's inheritance stub.
-      const rootText = texts.get(model.manifestPath) ?? (await readTextFile(model.manifestPath));
-      texts.set(model.manifestPath, rootText);
-      const workspaceDecls = await readWorkspaceDeps(model.root);
-      const workspaceDecl = workspaceDecls.find((d) => d.name === declaration.packageName);
+      if ((await ensureText(model.manifestPath)) === undefined) {
+        notes.push(t('Workspace manifest not found.'));
+        continue;
+      }
+      const workspaceDecls = await readWorkspaceDependencies(model.root);
+      // A member inherits the entry with the same *key*. Only fall back to the
+      // package name when the key cannot be found, otherwise two aliases of
+      // the same crate would let us rewrite the wrong table entry.
+      const workspaceDecl =
+        workspaceDecls.find((candidate) => candidate.name === declaration.key) ??
+        workspaceDecls.find((candidate) => candidate.packageName === declaration.packageName);
       if (!workspaceDecl) {
         notes.push(t('{0} is not declared in [workspace.dependencies]; skipped.', declaration.packageName));
         continue;
@@ -408,81 +561,155 @@ async function applyUpgrades(
         declaration: {
           ...declaration,
           key: workspaceDecl.name,
+          packageName: workspaceDecl.packageName,
           version: workspaceDecl.version,
           rawValue: workspaceDecl.rawValue,
           table: 'dependencies',
+          tablePath: undefined,
         },
-        newRequirement: upgrade.newRequirement ?? declaration.version ?? '*',
+        newRequirement: upgrade.newRequirement ?? workspaceDecl.version ?? '*',
         targetVersion: target,
         workspaceDependency: true,
+        lockOnly: upgrade.lockOnly,
       });
       continue;
     }
 
+    // Path/git/workspace stubs have no registry requirement to rewrite.
+    if (declaration.kind !== 'registry') continue;
     const file = declaration.manifestPath;
-    if (!texts.has(file)) texts.set(file, await readTextFile(file));
+    if ((await ensureText(file)) === undefined) {
+      notes.push(t('Manifest for {0} was not found; skipped.', declaration.packageName));
+      continue;
+    }
     edits.push({
       manifestPath: file,
       declaration,
       newRequirement: upgrade.newRequirement ?? declaration.version ?? '*',
       targetVersion: target,
+      lockOnly: upgrade.lockOnly,
     });
   }
 
   if (!edits.length) {
-    host.toast(notes.join(' ') || t('Nothing to upgrade.'), 'warning');
+    notifier.toast(notes.join(' ') || t('Nothing to upgrade.'), 'warning');
     return;
   }
 
-  // Show the planned manifest diffs before writing.
-  const preview = planUpgrades(edits, texts);
-  if (!preview.files.size) {
-    host.toast(t('No manifest changes were necessary.'), 'warning');
+  const plan = planUpgrades(edits, texts);
+  const changes = [...plan.files.entries()]
+    .filter(([file, updated]) => updated !== texts.get(file))
+    .map(([file, updated]) => ({ path: file, original: texts.get(file), updated }));
+  const lockSpecs = [...plan.manifestUpdates, ...plan.lockOnly];
+  const lockSummary = lockSpecs.map((spec) => `${spec.name}@${spec.targetVersion}`).join(', ');
+
+  if (!changes.length && !lockSpecs.length) {
+    notifier.toast(notes.join(' ') || t('No changes are necessary; the selection is already up to date.'), 'warning');
     return;
   }
 
-  const summary = [...preview.files.keys()].map((f) => vscode.workspace.asRelativePath(f)).join(', ');
-  const approved = await vscode.window.showWarningMessage(
-    t('Upgrade {0} dependency(ies)? These files change: {1}', edits.length, summary),
-    { modal: true, detail: t('Manifests are rewritten, then cargo update and cargo check run.') },
-    t('Upgrade'),
-  );
-  if (!approved) return;
-
-  host.busy(true, t('Upgrading dependencies…'));
-  const result = await writeFilesWithVerification({
-    root: model.root,
-    files: preview.files,
-    cargo: services.cargo,
-    verify: { metadata: true, check: true, workspace: model.kind === 'workspace' },
-  });
-
-  if (!result.ok) {
-    host.busy(false);
-    host.toast(t('Upgrade failed; review the Rust Forge output.'), 'error');
-    await controller.refresh();
-    return;
+  // Destructive path: show real diffs and require an explicit modal answer.
+  if (changes.length) {
+    if (lockSpecs.length) {
+      void vscode.window.showInformationMessage(t('Lockfile refreshes will run afterwards: {0}', lockSummary));
+    }
+    const approved = await confirmWithDiffs(changes, t('Upgrade dependencies'));
+    if (!approved) return;
+  } else {
+    const approved = await vscode.window.showWarningMessage(
+      t('Refresh Cargo.lock for {0} dependency(ies)?', lockSpecs.length),
+      {
+        modal: true,
+        detail: t('No manifest changes are needed. These packages will be refreshed in Cargo.lock: {0}', lockSummary),
+      },
+      t('Refresh lockfile'),
+    );
+    if (!approved) return;
   }
 
-  if (preview.updateSpecs.length) {
-    const update = await services.cargo.update(model.root, preview.updateSpecs);
-    if (update.code !== 0) {
-      host.busy(false);
-      host.toast(t('cargo update reported an error: {0}', update.stderr.trim().slice(0, 300)), 'warning');
+  notifier.busy(true, t('Upgrading dependencies…'));
+  if (changes.length) {
+    const result = await writeFilesWithVerification({
+      root: model.root,
+      files: new Map(changes.map((change) => [change.path, change.updated])),
+      cargo: services.cargo,
+      verify: { metadata: true, check: true, workspace: model.kind === 'workspace' },
+    });
+    if (!result.ok) {
+      notifier.busy(false);
+      notifier.toast(t('Upgrade failed; review the Rust Forge output.'), 'error');
       await controller.refresh();
       return;
     }
   }
 
-  host.busy(false);
+  let lockFailed = false;
+  if (plan.manifestUpdates.length) {
+    const update = await services.cargo.refreshPackages(
+      model.root,
+      plan.manifestUpdates.map((spec) => spec.name),
+    );
+    if (update.code !== 0) {
+      lockFailed = true;
+      notifier.toast(t('cargo update reported an error: {0}', commandError(update.stderr, update.stdout)), 'warning');
+    }
+  }
+  if (plan.lockOnly.length) {
+    const update = await services.cargo.updatePrecise(model.root, plan.lockOnly);
+    if (update.code !== 0) {
+      lockFailed = true;
+      notifier.toast(t('cargo update reported an error: {0}', commandError(update.stderr, update.stdout)), 'warning');
+    }
+  }
+
+  // A broken resolution is surfaced even though the changes are kept.
+  let verified = true;
+  if (plan.manifestUpdates.length || plan.lockOnly.length) {
+    const report = await runVerification(services, model.root, model.kind === 'workspace');
+    verified = report.ok;
+    if (!verified) {
+      notifier.toast(t('Verification failed after refreshing Cargo.lock. Review the Rust Forge output.'), 'error');
+    }
+  }
+
+  notifier.busy(false);
   await controller.refresh();
   await controller.syncContextKeys();
-  host.toast(t('Upgraded {0} dependencies.', edits.length), 'success');
+
+  if (lockFailed || !verified) return;
+  const upgraded = new Set(lockSpecs.map((spec) => spec.name)).size;
+  notifier.toast(t('Upgraded {0} dependencies.', upgraded), 'success');
 }
 
-async function readWorkspaceDeps(root: string): Promise<import('../core/cargo/manifestDeps.js').WorkspaceDependencyDeclaration[]> {
-  const { readWorkspaceDependencies } = require('../core/cargo/manifestDeps.js') as typeof import('../core/cargo/manifestDeps.js');
-  return readWorkspaceDependencies(root);
+function commandError(stderr: string, stdout: string): string {
+  return (stderr.trim() || stdout.trim() || t('unknown error')).slice(0, 300);
+}
+
+async function runVerification(services: Services, root: string, workspace: boolean): Promise<VerificationReport> {
+  return vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: t('Verifying changes…'), cancellable: false },
+    async (progress) => {
+      try {
+        const report = await verify(services.cargo, {
+          cwd: root,
+          metadata: true,
+          check: true,
+          workspace,
+          onStepStart: (name) => progress.report({ message: name }),
+        });
+        log(formatReport(report));
+        return report;
+      } catch (err) {
+        // Keep the pipeline finishing even when the task rejects.
+        const report: VerificationReport = {
+          ok: false,
+          steps: [{ name: t('Verification'), ok: false, output: (err as Error).message }],
+        };
+        log(formatReport(report));
+        return report;
+      }
+    },
+  );
 }
 
 /**
@@ -534,8 +761,9 @@ export async function removeDependencyCommand(
 
   const table = declarationTablePath(declaration);
   const text = await readTextFile(declaration.manifestPath);
-  const editor = new TomlEditor(text);
-  const updated = editor.apply(editor.removeKey(table, declaration.key, { dropEmptyTable: true }));
+  // Handles every declaration form (string, inline table, dotted keys,
+  // sub-table); removeKey alone cannot see dotted/sub-table declarations.
+  const updated = planRemove(declaration.manifestPath, table, declaration.key, text);
   if (updated === text) {
     void vscode.window.showInformationMessage(t('{0} is not declared in that table.', declaration.packageName));
     return;
@@ -554,10 +782,8 @@ export async function removeDependencyCommand(
     }
     if (!usedElsewhere) {
       const rootText = await readTextFile(model.manifestPath);
-      const rootEditor = new TomlEditor(rootText);
-      const rootUpdated = rootEditor.apply(
-        rootEditor.removeKey('workspace.dependencies', declaration.packageName, { dropEmptyTable: true }),
-      );
+      // The workspace entry keeps the member's key (inheritance matches keys).
+      const rootUpdated = planRemove(model.manifestPath, 'workspace.dependencies', declaration.key, rootText);
       if (rootUpdated !== rootText) files.set(model.manifestPath, rootUpdated);
     }
   }

@@ -233,11 +233,15 @@ export class TomlEditor {
     }
     if (trimmed.startsWith('[')) {
       const array = trimmed.startsWith('[[');
-      const close = trimmed.lastIndexOf(array ? ']]' : ']');
+      // Ignore a trailing comment: a `]` inside it must not truncate the
+      // header and turn an otherwise valid table into an invalid statement.
+      const comment = findTrailingComment(this.text, start, end);
+      const header = this.text.slice(start, comment < end ? comment : end).trim();
+      const close = header.lastIndexOf(array ? ']]' : ']');
       if (close < 0) {
         return { kind: 'invalid', start, end, raw };
       }
-      const inner = trimmed.slice(array ? 2 : 1, close);
+      const inner = header.slice(array ? 2 : 1, close);
       const path = parseDottedKey(inner);
       if (!path) {
         return { kind: 'invalid', start, end, raw };
@@ -360,8 +364,41 @@ export class TomlEditor {
     const table = this.getTable(tableName);
     if (!table) return undefined;
     const path = toKeyPath(key);
-    const stmt = table.statements.find((s) => samePath(s.keyPath!, path));
+    let stmt = table.statements.find((s) => samePath(s.keyPath!, path));
+    // A quoted key may itself contain dots (`"foo.bar"`); match its raw text
+    // before treating the argument as a dotted path.
+    if (!stmt && typeof key === 'string') {
+      const raw = key.trim();
+      stmt = table.statements.find((s) => s.keyRaw?.trim() === raw);
+    }
     return stmt ? { table, statement: stmt } : undefined;
+  }
+
+  /**
+   * Every key/value statement with the table path it belongs to. This sees
+   * declarations written as dotted keys (including at the document root),
+   * which table-based lookup cannot reach.
+   */
+  allKeyStatements(): { table: TableInfo; tablePath: string[]; statement: Statement }[] {
+    const result: { table: TableInfo; tablePath: string[]; statement: Statement }[] = [];
+    for (const table of this.tables.values()) {
+      for (const stmt of table.statements) {
+        result.push({ table, tablePath: table.path, statement: stmt });
+      }
+    }
+    return result;
+  }
+
+  /** Find a key/value statement by its full decoded path. */
+  findByPath(path: string[]): KeyLocation | undefined {
+    for (const table of this.tables.values()) {
+      for (const stmt of table.statements) {
+        if (samePath([...table.path, ...(stmt.keyPath ?? [])], path)) {
+          return { table, statement: stmt };
+        }
+      }
+    }
+    return undefined;
   }
 
   getValue(tableName: string, key: string): string | undefined {
@@ -406,23 +443,23 @@ export class TomlEditor {
    * Remove a key. When `dropEmptyTable` is set the table header is removed too
    * if this was its only entry.
    */
-  removeKey(tableName: string, key: string, options: { dropEmptyTable?: boolean } = {}): TextEdit[] {
+  removeKey(tableName: string, key: string | string[], options: { dropEmptyTable?: boolean } = {}): TextEdit[] {
     const table = this.getTable(tableName);
     if (!table) return [];
-    const pathParts = parseDottedKey(key);
+    const pathParts = Array.isArray(key) ? key : parseDottedKey(key);
     if (!pathParts) return [];
     const stmt = table.statements.find((s) => samePath(s.keyPath!, pathParts));
     if (!stmt) return [];
 
-    const edits: TextEdit[] = [{ start: lineStartOffset(this.text, stmt.start), end: statementLineEnd(this.text, stmt.end), text: '' }];
-
     if (options.dropEmptyTable && table.statements.length === 1) {
       const header = this.statements[table.headerIndex];
       if (header) {
-        edits.push({ start: lineStartOffset(this.text, header.start), end: statementLineEnd(this.text, header.end), text: '' });
+        // Remove the header together with the key so comments that belonged to
+        // the table do not end up attached to the previous section.
+        return [{ start: lineStartOffset(this.text, header.start), end: statementLineEnd(this.text, stmt.end), text: '' }];
       }
     }
-    return edits;
+    return [{ start: lineStartOffset(this.text, stmt.start), end: statementLineEnd(this.text, stmt.end), text: '' }];
   }
 
   /** Replace an entire table, header included. */

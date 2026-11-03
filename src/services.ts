@@ -35,6 +35,7 @@ export class Services implements vscode.Disposable {
       offline: settings.offline,
       cacheHours: settings.auditCacheHours,
       cacheDir: path.join(context.globalStorageUri.fsPath, 'audit'),
+      cargoPath: settings.cargoPath,
     });
 
     this.disposables.push(
@@ -91,6 +92,7 @@ export class Services implements vscode.Disposable {
       offline: settings.offline,
       cacheHours: settings.auditCacheHours,
       cacheDir: path.join(this.context.globalStorageUri.fsPath, 'audit'),
+      cargoPath: settings.cargoPath,
     });
   }
 

@@ -18,7 +18,8 @@ export type PanelKind =
   | 'convert'
   | 'wizard'
   | 'audit'
-  | 'health';
+  | 'health'
+  | 'topology';
 
 export interface DependencyRow {
   id: string;
@@ -37,6 +38,20 @@ export interface DependencyRow {
   registryUnavailable: boolean;
   isWorkspaceDependency: boolean;
   table: DependencyTable;
+  /** Requirement written by the upgrade; equal to `requirement` for lock-only updates. */
+  requirementAfter?: string;
+  /** How the upgrade is applied: rewrite the manifest, refresh Cargo.lock, or nothing. */
+  changeMode?: 'manifest' | 'lock-only' | 'none';
+  /** Crate feature-set difference between the locked and target release. */
+  featureChange?: { added: string[]; removed: string[]; defaultChanged: boolean };
+  /** `rust-version` declared by the target release. */
+  targetRustVersion?: string;
+  /** `rust-version` declared by the currently locked release. */
+  lockedRustVersion?: string;
+  /** True when the target release needs a newer compiler than the active toolchain. */
+  msrvViolated?: boolean;
+  /** True when the target release has no `rust-version` metadata. */
+  msrvUnknown?: boolean;
 }
 
 export interface UpgradePanelData {
@@ -44,6 +59,53 @@ export interface UpgradePanelData {
   rows: DependencyRow[];
   registryDegraded: boolean;
   workspace: boolean;
+  /** Active compiler version used for the MSRV comparison. */
+  toolchainVersion?: string;
+}
+
+/** Workspace topology: members, default-members and exclude in one view. */
+export interface TopologyMemberData {
+  name: string;
+  /** Workspace-relative, slash-separated member directory. */
+  relative: string;
+  manifestPath: string;
+  isRootPackage: boolean;
+  /** Explicit `workspace.members` entry that includes this member, when any. */
+  memberPattern?: string;
+  coveredByGlob: boolean;
+  /** True when this member is selected by `workspace.default-members`. */
+  isDefault: boolean;
+  /** True when an `exclude` entry would drop this directory from glob expansion. */
+  excluded: boolean;
+}
+
+export interface TopologyPatternData {
+  pattern: string;
+  glob: boolean;
+  /** Directories the pattern actually resolves to after `exclude` is applied. */
+  resolved: string[];
+  /** Directories the pattern would match but `exclude` removes. */
+  excluded: string[];
+}
+
+export interface TopologyIssueData {
+  id: string;
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+}
+
+export interface TopologyPanelData {
+  kind: 'topology-panel';
+  workspace: boolean;
+  /** Absolute workspace root, used to build suggested paths. */
+  root: string;
+  members: TopologyMemberData[];
+  patterns: TopologyPatternData[];
+  defaultMembers: string[];
+  exclude: string[];
+  issues: TopologyIssueData[];
+  /** True when `workspace.default-members` is present in the manifest. */
+  hasDefaultMembers: boolean;
 }
 
 /** Dependency health: duplicates, unused declarations and workspace inheritance. */
@@ -204,7 +266,8 @@ export type PanelData =
   | StandardizePanelData
   | ConvertPanelData
   | WizardPanelData
-  | HealthPanelData;
+  | HealthPanelData
+  | TopologyPanelData;
 
 export interface Toast {
   type: 'toast';
@@ -274,6 +337,10 @@ export type WebviewMessage =
   | { type: 'install'; request: InstallRequestPayload }
   | { type: 'upgradeSelected'; ids: string[] }
   | { type: 'upgradeAllSafe' }
+  | { type: 'saveTopology'; defaultMembers: string[]; exclude: string[] }
+  | { type: 'moveMember'; member: string }
+  | { type: 'promoteWorkspaceDependency'; packageName: string; members?: string[] }
+  | { type: 'convergeWorkspaceDependency'; name: string }
   | { type: 'saveProperties'; edits: PropertyEditPayload[] }
   | {
       type: 'saveRustfmt';

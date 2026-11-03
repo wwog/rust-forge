@@ -4,7 +4,7 @@ import type { ProjectController } from '../projectController.js';
 import { SnapshotTreeProvider } from './shared.js';
 import { t } from '../core/i18n.js';
 
-type ToolchainNodeKind = 'active' | 'msrv' | 'installed' | 'update' | 'group' | 'action' | 'component' | 'target';
+type ToolchainNodeKind = 'active' | 'msrv' | 'installed' | 'update' | 'group' | 'action' | 'component' | 'target' | 'status';
 
 interface ToolchainNode {
   kind: ToolchainNodeKind;
@@ -42,9 +42,20 @@ export class ToolchainTreeProvider extends SnapshotTreeProvider<ToolchainNode> {
   getChildren(element?: ToolchainNode): ToolchainNode[] {
     if (element) return element.children ?? [];
     const snapshot = this.controller.snapshot;
-    if (!snapshot) return [];
+    const phase = this.controller.phase;
+    if (!snapshot) {
+      if (phase === 'loading') return [this.statusNode('loading', t('Loading toolchain…'))];
+      if (phase === 'error') {
+        return [this.statusNode('error', t('Could not load the toolchain.'), this.controller.errors.join('\n') || undefined)];
+      }
+      return [];
+    }
     const state = snapshot.toolchain;
     const nodes: ToolchainNode[] = [];
+    if (phase === 'loading') nodes.push(this.statusNode('loading', t('Refreshing toolchain…')));
+    else if (phase === 'error') {
+      nodes.push(this.statusNode('error', t('Could not load the toolchain.'), this.controller.errors.join('\n') || undefined));
+    }
 
     if (!state.cargoPath) {
       nodes.push({
@@ -150,5 +161,17 @@ export class ToolchainTreeProvider extends SnapshotTreeProvider<ToolchainNode> {
     }
 
     return nodes;
+  }
+
+  private statusNode(status: 'loading' | 'error', label: string, tooltip?: string): ToolchainNode {
+    return {
+      kind: 'status',
+      label,
+      tooltip,
+      icon: status === 'loading' ? 'sync~spin' : 'error',
+      color: status === 'error' ? 'errorForeground' : undefined,
+      contextValue: `status:${status}`,
+      command: status === 'error' ? { command: 'rustForge.refresh', title: t('Retry') } : undefined,
+    };
   }
 }

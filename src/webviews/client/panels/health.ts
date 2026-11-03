@@ -240,6 +240,13 @@ function renderWorkspaceDependencies(data: HealthPanelData): HTMLElement {
           : t('These members declare the dependency directly instead of inheriting the workspace entry.'),
       ),
     );
+    if (issue.kind === 'not-inherited') {
+      const actions = el('div', { class: 'row', style: 'margin:8px 0' });
+      actions.appendChild(
+        button(t('Converge'), () => send({ type: 'convergeWorkspaceDependency', name: issue.name })),
+      );
+      card.appendChild(actions);
+    }
     if (issue.members.length) {
       const list = el('div', { class: 'list' });
       for (const member of issue.members) {

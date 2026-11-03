@@ -5,6 +5,7 @@
  * toolchain state) and fires events so every view refreshes consistently.
  */
 import * as path from 'node:path';
+import * as semver from 'semver';
 import * as vscode from 'vscode';
 import type { CargoMetadata } from './core/cargo/types.js';
 import { applyMetadataMembers, buildModel, discoverProject, parseManifestFile, type ProjectModel } from './core/cargo/project.js';
@@ -76,6 +77,11 @@ export class ProjectController implements vscode.Disposable {
     return this.model?.root;
   }
 
+  /** Errors from the last completed load, surfaced by the view placeholders. */
+  get errors(): string[] {
+    return this.lastErrors;
+  }
+
   /** Dependency node lookup by tree id, used by the upgrade panel. */
   findDependencyNode(id: string): import('./core/deps/tree.js').DependencyNode | undefined {
     const root = this.depTree?.root;
@@ -100,23 +106,39 @@ export class ProjectController implements vscode.Disposable {
       this.setEmpty();
       return;
     }
-    const discovered = await discoverProject(folder.uri.fsPath, { respectMembership: false });
-    if (!discovered.model) {
-      this.setEmpty();
-      return;
+    // Publish the loading state before the first filesystem/cargo round-trip so
+    // the views do not render their "no project" welcome while we are looking.
+    this.setPhase('loading');
+    try {
+      const discovered = await discoverProject(folder.uri.fsPath, { respectMembership: false });
+      if (!discovered.model) {
+        if (discovered.error && discovered.error !== 'no-manifest') this.fail(discovered.error);
+        else this.setEmpty();
+        return;
+      }
+      await this.load(discovered.model.root);
+    } catch (error) {
+      this.fail(error);
     }
-    await this.load(discovered.model.root);
   }
 
   /** Load (or reload) a project rooted at `dir`. */
   async load(dir: string): Promise<void> {
-    this.loadPhase = 'loading';
-    this.onDidChangeStateEmitter.fire('loading');
+    this.setPhase('loading');
+    try {
+      await this.reload(dir);
+    } catch (error) {
+      this.fail(error);
+    }
+  }
+
+  private async reload(dir: string): Promise<void> {
     const errors: string[] = [];
 
     const built = await buildModel(dir);
     if (!built.model) {
-      this.setEmpty(built.error);
+      if (built.error === 'no-manifest') this.setEmpty();
+      else this.fail(built.error ?? 'Could not read the Cargo manifest.');
       return;
     }
     this.model = built.model;
@@ -146,7 +168,7 @@ export class ProjectController implements vscode.Disposable {
       declarations,
       workspaceDependencies: workspaceDeps.map((d) => ({
         key: d.name,
-        packageName: d.name,
+        packageName: d.packageName,
         table: 'dependencies' as const,
         tablePath: 'workspace.dependencies',
         version: d.version,
@@ -167,13 +189,32 @@ export class ProjectController implements vscode.Disposable {
 
     this.depTree = tree;
     this.auditResult = audit;
-    this.toolchainState = await this.services.toolchain.detect(this.model.root, this.metadata?.packages.find((p) => p.name === this.primaryPackageName())?.rust_version ?? undefined);
+    this.toolchainState = await this.services.toolchain.detect(this.model.root, this.projectMsrv());
     this.propertiesModel = await readProperties(this.model);
     this.lastErrors = errors;
     this.loadPhase = 'ready';
     await this.updateContextKeys();
     this.onDidChangeStateEmitter.fire('ready');
     this.onDidChangeEmitter.fire();
+  }
+
+  /**
+   * Highest `rust-version` across the workspace. A virtual workspace has no
+   * single root package, and taking one arbitrary member would miss a stricter
+   * MSRV declared elsewhere.
+   */
+  private projectMsrv(): string | undefined {
+    const packages = this.metadata?.packages ?? [];
+    const versions = packages.map((pkg) => pkg.rust_version).filter((version): version is string => !!version);
+    if (!versions.length) {
+      return packages.find((pkg) => pkg.name === this.primaryPackageName())?.rust_version ?? undefined;
+    }
+    return versions.reduce((highest, version) => {
+      const candidate = semver.coerce(version);
+      const current = semver.coerce(highest);
+      if (!candidate || !current) return highest;
+      return semver.gte(candidate, current) ? version : highest;
+    });
   }
 
   private async loadDeclarations(model: ProjectModel): Promise<{ member: string; manifestPath: string; deps: DependencyDeclaration[] }[]> {
@@ -228,9 +269,21 @@ export class ProjectController implements vscode.Disposable {
     this.auditResult = undefined;
     this.propertiesModel = undefined;
     this.lastErrors = error && error !== 'no-manifest' ? [error] : [];
-    this.loadPhase = 'idle';
+    this.setPhase('idle');
+    this.onDidChangeEmitter.fire();
+  }
+
+  /** Transition the load phase and let the views re-render immediately. */
+  private setPhase(phase: LoadPhase): void {
+    this.loadPhase = phase;
     void this.updateContextKeys();
-    this.onDidChangeStateEmitter.fire('idle');
+    this.onDidChangeStateEmitter.fire(phase);
+  }
+
+  /** Record a failed load; any model already loaded stays on screen. */
+  private fail(error: unknown): void {
+    this.lastErrors = [error instanceof Error ? error.message : String(error)];
+    this.setPhase('error');
     this.onDidChangeEmitter.fire();
   }
 
@@ -270,6 +323,7 @@ export class ProjectController implements vscode.Disposable {
   private async updateContextKeys(): Promise<void> {
     const hasProject = !!this.model;
     await vscode.commands.executeCommand('setContext', 'rustForge.hasProject', hasProject);
+    await vscode.commands.executeCommand('setContext', 'rustForge.loading', this.loadPhase === 'loading');
     await vscode.commands.executeCommand('setContext', 'rustForge.isWorkspace', this.model?.kind === 'workspace');
     await vscode.commands.executeCommand('setContext', 'rustForge.singlePackage', this.model?.kind === 'package');
   }

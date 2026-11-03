@@ -18,6 +18,7 @@ import type {
   InstallPanelData,
   PropertiesPanelData,
   HealthPanelData,
+  TopologyPanelData,
 } from '../protocol.js';
 import { renderInstall, applySearchResults, applyCrateDetail, applyCrateDetailFailed } from './panels/install.js';
 import { renderUpgrade } from './panels/upgrade.js';
@@ -27,6 +28,7 @@ import { renderStandardize } from './panels/standardize.js';
 import { renderConvert } from './panels/convert.js';
 import { renderWizard } from './panels/wizard.js';
 import { renderHealth } from './panels/health.js';
+import { renderTopology } from './panels/topology.js';
 import { registerI18n, t } from './i18n.js';
 import { send, setSender } from './bridge.js';
 
@@ -130,6 +132,9 @@ function render(data: PanelData): void {
     case 'health-panel':
       fragment.appendChild(renderHealth(data));
       break;
+    case 'topology-panel':
+      fragment.appendChild(renderTopology(data));
+      break;
     default:
       break;
   }
@@ -232,4 +237,5 @@ export type {
   InstallRequestPayload,
   PropertyEditPayload,
   HealthPanelData,
+  TopologyPanelData,
 };

@@ -272,7 +272,9 @@ export function parseToolchainList(output: string, active?: string): InstalledTo
   for (const line of output.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    const defaultToolchain = /\(default\)/.test(trimmed);
+    // Current rustup prints `stable-... (active, default)`, so the marker is
+    // not necessarily the only word inside the parentheses.
+    const defaultToolchain = /\([^)]*\bdefault\b[^)]*\)/.test(trimmed);
     const activeMark = /\(active/.test(trimmed);
     const name = trimmed.replace(/\s*\(.*?\)\s*/g, ' ').trim();
     if (!name) continue;

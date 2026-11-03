@@ -13,7 +13,8 @@ import type { ProjectModel } from '../cargo/project.js';
 import { lockedVersion, type LockfileInfo } from '../cargo/lockfile.js';
 import type { Advisory } from '../audit.js';
 import { latestStableVersion, type CrateDetail } from './registry.js';
-import { classifyUpgrade, type UpgradeAssessment } from './versions.js';
+import { classifyUpgrade, type FeatureChange, type UpgradeAssessment } from './versions.js';
+import { diffCrateFeatures } from './upgradePlan.js';
 
 export type DependencyNodeKind = 'workspace' | 'member' | 'dependency' | 'localDependency' | 'group';
 
@@ -29,6 +30,16 @@ export interface DependencyNode {
   /** True when crates.io could not be reached. */
   registryUnavailable?: boolean;
   upgrade?: UpgradeAssessment;
+  /**
+   * Informational feature diff between the locked and target release. It is
+   * never fed into `classifyUpgrade`, so new crate features cannot silently
+   * reclassify an otherwise safe upgrade.
+   */
+  featureChange?: FeatureChange;
+  /** `rust-version` declared by the target release, when crates.io reports it. */
+  targetRustVersion?: string;
+  /** `rust-version` declared by the currently locked release. */
+  lockedRustVersion?: string;
   advisories: Advisory[];
   /** Declaring member (workspace mode) and manifest path. */
   memberName?: string;
@@ -205,32 +216,63 @@ interface NodeContext {
 
 function buildDependencyNode(ctx: NodeContext): DependencyNode | undefined {
   const { decl } = ctx;
-  const localMember = resolveLocalMember(decl, ctx.memberByName);
-  const locked = localMember ? undefined : lockedVersion(ctx.lockfile, decl.packageName);
-  const crate = localMember ? undefined : ctx.registryData.get(decl.packageName);
+  // An inherited declaration takes its kind/version/path from the workspace
+  // table. Without this, a `[workspace.dependencies] foo = { path = ... }`
+  // inherited by a member is mistaken for a registry dependency and gets
+  // "upgraded" by writing a version into the path entry.
+  const inherited = decl.kind === 'workspace' ? workspaceEntry(decl, ctx.workspaceDependencies) : undefined;
+  const effective: DependencyDeclaration = inherited
+    ? {
+        ...decl,
+        packageName: inherited.packageName,
+        kind: inherited.kind,
+        version: inherited.version,
+        path: inherited.path,
+        git: inherited.git,
+        rawValue: inherited.rawValue,
+        features: decl.features.length ? decl.features : inherited.features,
+        defaultFeatures: decl.defaultFeatures ?? inherited.defaultFeatures,
+        manifestPath: inherited.manifestPath,
+      }
+    : decl;
 
-  const requirement = decl.kind === 'workspace' ? workspaceRequirement(decl, ctx.workspaceDependencies) : decl.version;
+  const requirement = effective.version;
+  const localMember = resolveLocalMember(effective, ctx.memberByName);
+  const locked = localMember ? undefined : lockedVersion(ctx.lockfile, effective.packageName, requirement);
+  const crate = localMember ? undefined : ctx.registryData.get(effective.packageName);
+
   const latest = crate ? latestStableVersion(crate) : undefined;
   const targetVersionInfo = crate?.versions.find((v) => v.num === latest);
   const lockedVersionInfo = crate?.versions.find((v) => v.num === locked);
   const defaultFeatureSetChanged = defaultFeaturesChanged(lockedVersionInfo, targetVersionInfo);
+  // Display-only diff: classification keeps receiving `latestFeatures:
+  // undefined`, which is what makes newly added crate features non-blocking.
+  const featureChange = diffCrateFeatures(lockedVersionInfo, targetVersionInfo);
 
   const upgrade =
-    decl.kind === 'registry' || decl.kind === 'workspace'
+    effective.kind === 'registry'
       ? classifyUpgrade({
           declared: requirement ?? '*',
           locked,
           latest: crate?.maxVersion,
           latestStable: latest,
-          currentFeatures: decl.features,
+          currentFeatures: effective.features,
           latestFeatures: undefined,
           defaultFeatureSetChanged,
         })
       : undefined;
 
-  const nodeAdvisories = ctx.advisories.get(decl.packageName) ?? [];
+  const nodeAdvisories = (ctx.advisories.get(effective.packageName) ?? []).filter(
+    (advisory) => !advisory.packageVersion || !locked || advisory.packageVersion === locked,
+  );
   const icon =
-    decl.kind === 'path' ? 'package' : decl.kind === 'git' ? 'repo' : decl.kind === 'workspace' ? 'library' : 'cloud';
+    effective.kind === 'path'
+      ? 'package'
+      : effective.kind === 'git'
+        ? 'repo'
+        : effective.kind === 'workspace'
+          ? 'library'
+          : 'cloud';
 
   const node: DependencyNode = {
     kind: localMember ? 'localDependency' : 'dependency',
@@ -242,13 +284,16 @@ function buildDependencyNode(ctx: NodeContext): DependencyNode | undefined {
     latestVersion: latest,
     registryUnavailable: ctx.registryDegraded,
     upgrade,
+    featureChange,
+    targetRustVersion: targetVersionInfo?.rustVersion,
+    lockedRustVersion: lockedVersionInfo?.rustVersion,
     advisories: nodeAdvisories,
     memberName: ctx.memberName,
     manifestPath: decl.manifestPath,
     table: decl.table,
     declaration: decl,
     localTarget: localMember?.name,
-    features: decl.features,
+    features: effective.features,
     optional: decl.optional,
     isWorkspaceDependency: decl.kind === 'workspace',
     icon,
@@ -274,9 +319,17 @@ function descriptionFor(decl: DependencyDeclaration, locked: string | undefined,
   return parts.join(' · ');
 }
 
-function workspaceRequirement(decl: DependencyDeclaration, workspaceDeps?: DependencyDeclaration[]): string | undefined {
-  const match = workspaceDeps?.find((d) => d.packageName === decl.packageName || d.key === decl.packageName);
-  return match?.version ?? '*';
+function workspaceEntry(
+  decl: DependencyDeclaration,
+  workspaceDeps?: DependencyDeclaration[],
+): DependencyDeclaration | undefined {
+  // Inheritance matches the key. Falling back to the package name is only for
+  // manifests where the alias differs from the workspace entry name; checking
+  // it first would pick the wrong alias when one crate has two entries.
+  return (
+    workspaceDeps?.find((d) => d.key === decl.key) ??
+    workspaceDeps?.find((d) => d.packageName === decl.packageName || d.key === decl.packageName)
+  );
 }
 
 function defaultFeaturesChanged(

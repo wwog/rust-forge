@@ -15,6 +15,7 @@ import { t } from '../core/i18n.js';
 import { openFile } from '../views/shared.js';
 import { WebviewPanelHost } from '../webviews/host.js';
 import type { HealthPanelData, WebviewMessage } from '../webviews/protocol.js';
+import { convergeWorkspaceDependency } from './workspaceDeps.js';
 
 export async function dependencyHealthCommand(
   controller: ProjectController,
@@ -68,6 +69,26 @@ export async function dependencyHealthCommand(
         case 'openFile':
           await openFile(message.path, message.line);
           break;
+        case 'convergeWorkspaceDependency': {
+          try {
+            await convergeWorkspaceDependency(controller, services, host, message.name);
+          } catch (error) {
+            host.toast(error instanceof Error ? error.message : String(error), 'error');
+          }
+          // Re-render from disk even when the command was refused or
+          // verification failed, so the panel never keeps stale rows.
+          try {
+            const latest = controller.project ?? model;
+            const nextDeclared = await readDeclaredHealth(latest);
+            const nextDuplicates = await analyzeDuplicates(latest, services);
+            declared = nextDeclared;
+            duplicateState = nextDuplicates;
+            host.setData(toPanelData(latest, nextDeclared, nextDuplicates, false));
+          } catch (error) {
+            host.toast(error instanceof Error ? error.message : String(error), 'error');
+          }
+          break;
+        }
         case 'runCommand':
           await vscode.commands.executeCommand(message.command, ...(message.args ?? []));
           break;

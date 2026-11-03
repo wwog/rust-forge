@@ -89,9 +89,10 @@ export function dependencyKindToTable(kind: 'dev' | 'build' | null): DependencyT
 /** Split a cargo package id into name and version. */
 export function parsePackageId(id: string): { name: string; version: string } {
   if (id.includes('#')) {
-    const [prefix, rest] = id.split('#');
-    const version = rest.includes('@') ? rest.slice(rest.lastIndexOf('@') + 1) : '';
-    const name = prefix.includes('://') ? prefix.slice(prefix.lastIndexOf('/') + 1) : prefix;
+    const [, rest] = id.split('#');
+    const at = rest.lastIndexOf('@');
+    const version = at >= 0 ? rest.slice(at + 1) : '';
+    const name = at >= 0 ? rest.slice(0, at) : rest;
     return { name, version };
   }
   return { name: id, version: '' };

@@ -55,6 +55,8 @@ export async function run(command: string, args: string[], options: RunOptions):
     let settled = false;
     let timedOut = false;
     let cancelled = false;
+    /** Set as soon as the direct child exits, even while the pipe backstop runs. */
+    let exitCode: number | undefined;
     let timers: NodeJS.Timeout[] = [];
     let cancelCheck: NodeJS.Timeout | undefined;
 
@@ -72,6 +74,31 @@ export async function run(command: string, args: string[], options: RunOptions):
 
     const killTree = (signal: NodeJS.Signals) => {
       if (!child.pid) return;
+      // Windows has no process groups in the POSIX sense; `taskkill /T` is the
+      // supported way to terminate the rustup proxy's cargo/rustc children.
+      if (process.platform === 'win32') {
+        try {
+          const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+            stdio: 'ignore',
+            windowsHide: true,
+          });
+          killer.on('error', () => {
+            try {
+              child.kill(signal);
+            } catch {
+              // Already gone.
+            }
+          });
+          killer.unref();
+        } catch {
+          try {
+            child.kill(signal);
+          } catch {
+            // Already gone.
+          }
+        }
+        return;
+      }
       try {
         if (useGroup) process.kill(-child.pid, signal);
         else child.kill(signal);
@@ -111,7 +138,7 @@ export async function run(command: string, args: string[], options: RunOptions):
 
     if (options.timeoutMs) {
       after(options.timeoutMs, () => {
-        if (settled) return;
+        if (settled || exitCode !== undefined) return;
         timedOut = true;
         killTree('SIGKILL');
         // Do not depend on `close`: a surviving grandchild can keep the pipes
@@ -122,7 +149,9 @@ export async function run(command: string, args: string[], options: RunOptions):
 
     if (options.token) {
       cancelCheck = setInterval(() => {
-        if (settled || cancelled || !options.token!.isCancellationRequested) return;
+        // Once the child has exited, a later cancellation must not rewrite a
+        // successful exit into code 130 while the 100 ms pipe backstop runs.
+        if (settled || cancelled || exitCode !== undefined || !options.token!.isCancellationRequested) return;
         cancelled = true;
         killTree('SIGTERM');
         after(CANCEL_GRACE_MS, () => {
@@ -154,12 +183,14 @@ export async function run(command: string, args: string[], options: RunOptions):
     // `exit` fires even when descendants still hold stdout; settle shortly
     // after it so a stuck pipe cannot strand the caller.
     child.on('exit', (code) => {
-      if (settled) return;
-      after(100, () => finish(timedOut ? 124 : cancelled ? 130 : (code ?? 1)));
+      if (settled || exitCode !== undefined) return;
+      exitCode = code ?? 1;
+      after(100, () => finish(timedOut ? 124 : cancelled ? 130 : exitCode!));
     });
 
     child.on('close', (code) => {
-      finish(timedOut ? 124 : cancelled ? 130 : (code ?? 1));
+      if (exitCode === undefined) exitCode = code ?? 1;
+      finish(timedOut ? 124 : cancelled ? 130 : exitCode);
     });
 
     if (options.stdin !== undefined) {

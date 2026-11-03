@@ -29,10 +29,13 @@ import {
 import {
   installDependencyCommand,
   upgradeDependenciesCommand,
+  upgradeAllSafeCommand,
   openCrateDocs,
   removeDependencyCommand,
   addWorkspaceDependencyToMemberCommand,
 } from './commands/dependencies.js';
+import { workspaceTopologyCommand, moveMemberCommand } from './commands/members.js';
+import { promoteDependencyToWorkspaceCommand } from './commands/workspaceDeps.js';
 import { editPropertiesCommand } from './commands/properties.js';
 import { editRustfmtCommand } from './commands/rustfmt.js';
 import { standardizeCommand, runClippyCommand } from './commands/standardize.js';
@@ -79,6 +82,14 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   context.subscriptions.push(controller.onDidChange(refreshAll));
 
+  // Re-render as soon as a load starts: the views then show their loading row
+  // instead of staying empty (or stale) until the whole load settles.
+  context.subscriptions.push(
+    controller.onDidChangeState((phase) => {
+      if (phase === 'loading') refreshAll();
+    }),
+  );
+
   // ------------------------------------------------------------- commands
 
   const register = (id: string, handler: (...args: never[]) => unknown) =>
@@ -123,6 +134,22 @@ export function activate(context: vscode.ExtensionContext): void {
     await installDependencyCommand(controller, services, context.extensionUri, member);
   });
   register('rustForge.upgradeDependencies', () => upgradeDependenciesCommand(controller, services, context.extensionUri));
+  register('rustForge.upgradeAllSafe', () => upgradeAllSafeCommand(controller, services, context.extensionUri));
+  register('rustForge.workspaceTopology', () => workspaceTopologyCommand(controller, services, context.extensionUri));
+  register('rustForge.moveMember', async (item?: unknown) => {
+    const name =
+      item && typeof item === 'object' && 'memberName' in item
+        ? String((item as { memberName?: string }).memberName ?? '')
+        : undefined;
+    await moveMemberCommand(controller, services, name || undefined);
+  });
+  register('rustForge.promoteDependencyToWorkspace', async (item?: unknown) => {
+    await promoteDependencyToWorkspaceCommand(
+      controller,
+      services,
+      item && typeof item === 'object' && 'node' in item ? (item as DependencyTreeElement) : undefined,
+    );
+  });
   register('rustForge.upgradeDependency', async () => {
     await upgradeDependenciesCommand(controller, services, context.extensionUri);
   });

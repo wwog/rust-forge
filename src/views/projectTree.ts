@@ -14,13 +14,15 @@ import type { CargoPackage } from '../core/cargo/types.js';
 import { crateTargetContextSuffix, detectCrateTargets } from '../core/crateTarget.js';
 import { SnapshotTreeProvider, type FileTreeHost } from './shared.js';
 import {
+  excludePatterns,
   explorerSortOrder,
   isInside,
+  joinRelative,
   readDirectoryEntries,
   rootName,
   type FileEntry,
 } from './fileTree.js';
-import { sortEntries } from '../core/files.js';
+import { isPathExcluded, sortEntries, workspaceContainers } from '../core/files.js';
 import { t } from '../core/i18n.js';
 
 type ProjectNodeKind = 'root' | 'member' | 'directory' | 'file' | 'info' | 'action' | 'message';
@@ -92,11 +94,21 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
       return element.resourceUri ? this.listDirectory(element.resourceUri) : [];
     }
     if (element.kind === 'directory') {
-      return element.resourceUri ? this.listDirectory(element.resourceUri) : [];
+      if (!element.resourceUri) return [];
+      const project = this.controller.project;
+      const rootLevel = !!project && path.resolve(path.dirname(element.resourceUri.fsPath)) === path.resolve(project.root);
+      const visible = rootLevel
+        ? (await this.workspaceLayout()).visibleContainers.has(path.resolve(element.resourceUri.fsPath))
+        : false;
+      // A container directory is only shown because it has files that no
+      // member accounts for; member folders are represented as project nodes,
+      // so the container itself lists files only.
+      return this.listDirectory(element.resourceUri, undefined, visible);
     }
     if (element.kind === 'root') {
       if (!element.resourceUri) return [];
-      const entries = await this.listDirectory(element.resourceUri, this.hiddenRootNames());
+      const layout = await this.workspaceLayout();
+      const entries = await this.listDirectory(element.resourceUri, layout.hiddenRootNames);
       return element.contextValue?.startsWith('workspaceRoot') ? [...(await this.memberNodes()), ...entries] : entries;
     }
     return element.children ?? [];
@@ -122,7 +134,14 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
     if (!root) return [];
 
     const snapshot = this.controller.snapshot;
-    const nodes: ProjectNode[] = [await this.rootNode(root, project)];
+    const phase = this.controller.phase;
+    const nodes: ProjectNode[] = [];
+    // The project tree stays on the last known layout while refreshing; unlike
+    // Dependencies and Toolchain it never shows a loading row.
+    if (phase === 'error') {
+      nodes.push(this.statusNode('error', t('Could not load project data.'), this.controller.errors.join('\n') || undefined));
+    }
+    nodes.push(await this.rootNode(root, project));
 
     if (project?.emptyWorkspaceShell) {
       nodes.push({
@@ -166,6 +185,18 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
     }
 
     return nodes;
+  }
+
+  private statusNode(status: 'loading' | 'error', label: string, tooltip?: string): ProjectNode {
+    return {
+      kind: 'message',
+      label,
+      tooltip,
+      icon: status === 'loading' ? 'sync~spin' : 'error',
+      contextValue: `status:${status}`,
+      id: `status:${status}`,
+      command: status === 'error' ? { command: 'rustForge.refresh', title: t('Retry') } : undefined,
+    };
   }
 
   private async rootNode(root: vscode.Uri, project: ProjectModel | undefined): Promise<ProjectNode> {
@@ -258,30 +289,60 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
   }
 
   /**
-   * Root-level directories that only group workspace members (typically
-   * `crates`). They are omitted so members appear directly under the project.
+   * How the workspace root should be rendered.
+   *
+   * - Member directories are never listed twice: a member at the root is
+   *   hidden from the file listing, and a container such as `crates` is hidden
+   *   when it only groups members.
+   * - A container that also holds files is shown, but only its files: the
+   *   member folders inside it already appear as project nodes. Extra
+   *   directories are left for the Standardize panel to report.
    */
-  private hiddenRootNames(): Set<string> {
+  private async workspaceLayout(): Promise<{ hiddenRootNames: Set<string>; visibleContainers: Set<string> }> {
     const project = this.controller.project;
-    if (!project || project.kind !== 'workspace') return new Set();
-    const hidden = new Set<string>();
+    const hiddenRootNames = new Set<string>();
+    const visibleContainers = new Set<string>();
+    if (!project || project.kind !== 'workspace') return { hiddenRootNames, visibleContainers };
+
     for (const member of project.members) {
       const relative = path.relative(project.root, member.dir);
       if (!relative || path.isAbsolute(relative) || relative.startsWith('..')) continue;
-      const [first, ...rest] = relative.split(path.sep).filter(Boolean);
-      if (first && rest.length) hidden.add(first);
+      const parts = relative.split(path.sep).filter(Boolean);
+      // Top-level members and the workspace root package itself.
+      if (parts.length === 1) hiddenRootNames.add(parts[0]!);
     }
-    return hidden;
+
+    const excluded = excludePatterns();
+    for (const container of workspaceContainers(project.root, project.members.map((member) => member.dir))) {
+      let entries: [string, vscode.FileType][];
+      try {
+        entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(container.dir));
+      } catch {
+        hiddenRootNames.add(container.name);
+        continue;
+      }
+      const hasStrayFile = entries.some(
+        ([name, type]) =>
+          !container.memberChildren.has(name) &&
+          (type & vscode.FileType.Directory) === 0 &&
+          !isPathExcluded(joinRelative(container.name, name), excluded),
+      );
+      if (hasStrayFile) visibleContainers.add(path.resolve(container.dir));
+      else hiddenRootNames.add(container.name);
+    }
+    return { hiddenRootNames, visibleContainers };
   }
 
   private async listDirectory(
     directory: vscode.Uri,
     hiddenNames?: ReadonlySet<string>,
+    filesOnly = false,
   ): Promise<ProjectNode[]> {
     const root = this.rootUri ?? directory;
     try {
       const entries = await readDirectoryEntries(directory, root, hiddenNames);
-      return entries.map((entry) => this.entryNode(entry));
+      const visible = filesOnly ? entries.filter((entry) => !entry.isDirectory) : entries;
+      return visible.map((entry) => this.entryNode(entry));
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       return [

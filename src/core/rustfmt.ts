@@ -755,15 +755,22 @@ export function applyRustfmtEdits(existing: string | undefined, edits: RustfmtEd
  * option can never concatenate onto an existing value or a comment.
  */
 export function applyTopLevelOptionEdits(source: string, edits: RustfmtEdit[]): string {
-  const editor = new TomlEditor(source);
+  // Removals run first: an insertion point computed against the original text
+  // can fall inside a removed statement and trigger "Overlapping edits".
+  const removalEditor = new TomlEditor(source);
+  const removals: TextEdit[] = [];
+  const values: RustfmtEdit[] = [];
+  for (const edit of edits) {
+    if (edit.value === undefined) removals.push(...removalEditor.removeKey('', edit.key));
+    else values.push(edit);
+  }
+  const base = removals.length ? removalEditor.apply(removals) : source;
+
+  const editor = new TomlEditor(base);
   const collected: TextEdit[] = [];
   const added: string[] = [];
-
-  for (const edit of edits) {
-    if (edit.value === undefined) {
-      collected.push(...editor.removeKey('', edit.key));
-      continue;
-    }
+  for (const edit of values) {
+    if (edit.value === undefined) continue;
     const value = formatRustfmtValue(edit.value);
     if (editor.hasKey('', edit.key)) {
       collected.push(...editor.setKey('', edit.key, value));
@@ -786,7 +793,7 @@ export function applyTopLevelOptionEdits(source: string, edits: RustfmtEdit[]): 
     });
   }
 
-  if (!collected.length) return source;
+  if (!collected.length) return base;
   return editor.apply(collected);
 }
 

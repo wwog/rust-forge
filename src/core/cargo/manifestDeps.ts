@@ -39,7 +39,10 @@ export interface DependencyDeclaration {
 }
 
 export interface WorkspaceDependencyDeclaration {
+  /** Key in `[workspace.dependencies]` (the alias when renamed). */
   name: string;
+  /** Real crate name from `package = "..."`, or `name`. */
+  packageName: string;
   version?: string;
   kind: 'registry' | 'path' | 'git' | 'unknown';
   path?: string;
@@ -202,7 +205,7 @@ export async function readWorkspaceDependencies(root: string): Promise<Workspace
 function workspaceDeclarationFromValue(name: string, value: unknown, editor: TomlEditor): WorkspaceDependencyDeclaration | undefined {
   const line = findLine(editor, 'workspace.dependencies', name);
   if (typeof value === 'string') {
-    return { name, version: value, kind: 'registry', features: [], rawValue: JSON.stringify(value), line };
+    return { name, packageName: name, version: value, kind: 'registry', features: [], rawValue: JSON.stringify(value), line };
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const obj = value as Record<string, unknown>;
@@ -212,6 +215,7 @@ function workspaceDeclarationFromValue(name: string, value: unknown, editor: Tom
   else if (typeof obj.version === 'string') kind = 'registry';
   return {
     name,
+    packageName: typeof obj.package === 'string' ? obj.package : name,
     version: typeof obj.version === 'string' ? obj.version : undefined,
     kind,
     path: typeof obj.path === 'string' ? obj.path : undefined,

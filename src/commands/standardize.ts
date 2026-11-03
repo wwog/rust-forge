@@ -5,6 +5,7 @@ import type { ProjectController } from '../projectController.js';
 import type { Services } from '../services.js';
 import { analyzeStandardization, previewStandardization, type StandardizeFinding } from '../core/standardize.js';
 import { buildModel } from '../core/cargo/project.js';
+import { workspaceContainers } from '../core/files.js';
 import { t } from '../core/i18n.js';
 import { getOutput, writeFilesWithVerification } from './shared.js';
 import { WebviewPanelHost } from '../webviews/host.js';
@@ -58,12 +59,17 @@ export async function standardizeCommand(
     id: KEY,
     title: t('Standardize project'),
     data: state.data,
-    // Findings come from the root manifest plus the config files they would move.
+    // Findings come from the root manifest plus the config files they would
+    // move, and from stray content in member container directories.
     watch: [
       initial.model.manifestPath,
       path.join(root, 'rustfmt.toml'),
       path.join(root, '.rustfmt.toml'),
       path.join(root, 'clippy.toml'),
+      ...workspaceContainers(
+        root,
+        initial.model.members.map((member) => member.dir),
+      ).map((container) => path.join(container.dir, '*')),
     ],
     reload: async () => (state = await buildState()).data,
     handlers: async (message: WebviewMessage) => {
@@ -143,12 +149,10 @@ async function apply(
     );
     if (!approved) return;
 
-    // Build the final content per file, preserving later-writer wins. The write
+    // Build the final content per file through the same composer the preview
+    // uses, so multiple findings on one manifest are all applied. The write
     // helper owns the write so failure recovery and verification stay in one place.
-    const files = new Map<string, string>();
-    for (const finding of selected) {
-      for (const change of finding.changes) files.set(change.path, change.content);
-    }
+    const files = new Map<string, string>(previews.map((preview) => [preview.path, preview.newContent]));
 
     const result = await writeFilesWithVerification({
       root: snapshot.model.root,

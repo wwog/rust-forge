@@ -79,8 +79,27 @@ export async function preflight(root: string, options: { targetDirName?: string;
   const manifest = (await parseManifestFile(model.manifestPath)).data ?? {};
   const pkg = (manifest.package ?? {}) as Record<string, unknown>;
   const packageName = String(pkg.name ?? path.basename(root));
-  const targetDirName = options.targetDirName ?? packageName;
+  const targetDirName = (options.targetDirName ?? packageName).trim();
   const targetDir = path.join(root, 'crates', targetDirName);
+  const cratesDir = path.join(root, 'crates');
+
+  // The panel accepts free text; never let it move files outside the
+  // workspace (`../..`, absolute paths, nested separators).
+  if (
+    !targetDirName ||
+    targetDirName === '.' ||
+    targetDirName === '..' ||
+    path.isAbsolute(targetDirName) ||
+    /[\\/]/.test(targetDirName) ||
+    !isInside(cratesDir, targetDir) ||
+    path.resolve(targetDir) === path.resolve(cratesDir)
+  ) {
+    issues.push({
+      id: 'invalid-target-dir',
+      severity: 'blocking',
+      message: t('The directory name must stay inside crates/ and cannot contain path separators.'),
+    });
+  }
 
   if (await fileExists(targetDir)) {
     issues.push({
@@ -285,14 +304,15 @@ export async function applyConversion(
   const targetDir = planned.targetDir;
 
   try {
+    assertInsideWorkspace(root, targetDir);
     // Record originals before moving anything.
     await snapshots.record(snapshot, path.join(root, 'Cargo.toml'));
+    // The lockfile is deleted and regenerated; keep its bytes so a rollback
+    // restores the original resolution instead of leaving no lockfile at all.
+    await snapshots.record(snapshot, path.join(root, 'Cargo.lock'));
     const moves = await planMoves(root, targetDir);
     for (const move of moves) {
       await snapshots.recordMove(snapshot, { from: move.from, to: move.to, kind: 'file' });
-    }
-    if (await fileExists(path.join(root, 'Cargo.lock'))) {
-      await snapshots.recordAbsent(snapshot, path.join(root, 'Cargo.lock'));
     }
 
     await fs.mkdir(path.join(root, 'crates'), { recursive: true });
@@ -312,7 +332,9 @@ export async function applyConversion(
         const source = path.join(root, file);
         if (await fileExists(source)) {
           const dest = path.join(targetDir, file);
-          await snapshots.recordAbsent(snapshot, dest);
+          // `record` preserves an existing file (copy overwrites it) and only
+          // marks the destination for deletion when it did not exist before.
+          await snapshots.record(snapshot, dest);
           await fs.copyFile(source, dest);
         }
       }

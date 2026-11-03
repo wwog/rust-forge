@@ -4,6 +4,7 @@
  * Kept free of `vscode` imports so the ordering and exclude rules stay
  * testable under plain Node.
  */
+import * as path from 'node:path';
 
 export interface SortableEntry {
   name: string;
@@ -74,6 +75,57 @@ export function compileGlob(glob: string): RegExp {
   const regex = new RegExp(source);
   globCache.set(glob, regex);
   return regex;
+}
+
+/**
+ * Root-level directories used only to group workspace members, e.g. `crates`
+ * for `crates/app`. The project view normally hides such a directory and lists
+ * the members at the top level.
+ */
+export interface WorkspaceContainer {
+  /** First path segment relative to the workspace root. */
+  name: string;
+  /** Absolute directory path. */
+  dir: string;
+  /**
+   * Direct child names that are on the path to a member (`app` for
+   * `crates/app`, `group` for `crates/group/app`).
+   */
+  memberChildren: Set<string>;
+}
+
+/** Group members by the root-level directory that contains them. */
+export function workspaceContainers(
+  root: string,
+  memberDirs: readonly string[],
+): WorkspaceContainer[] {
+  const grouped = new Map<string, Set<string>>();
+  for (const dir of memberDirs) {
+    const relative = path.relative(root, dir);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue;
+    const parts = relative.split(/[\\/]/).filter(Boolean);
+    if (parts.length < 2) continue;
+    const children = grouped.get(parts[0]!) ?? new Set<string>();
+    children.add(parts[1]!);
+    grouped.set(parts[0]!, children);
+  }
+  return [...grouped].map(([name, memberChildren]) => ({
+    name,
+    dir: path.join(root, name),
+    memberChildren,
+  }));
+}
+
+/**
+ * Entries inside a container that no workspace member accounts for. These are
+ * the files the project view still needs to show once the member folders are
+ * represented as top-level project nodes.
+ */
+export function unexpectedContainerEntries<T extends { name: string }>(
+  container: WorkspaceContainer,
+  entries: readonly T[],
+): T[] {
+  return entries.filter((entry) => !container.memberChildren.has(entry.name));
 }
 
 /**

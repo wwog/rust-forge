@@ -2,7 +2,7 @@
 import * as vscode from 'vscode';
 import type { ProjectController } from '../projectController.js';
 import type { DependencyNode } from '../core/deps/tree.js';
-import { SnapshotTreeProvider } from './shared.js';
+import { SnapshotTreeProvider, errorStatus, isStatusNode, statusTreeItem, type StatusNode } from './shared.js';
 import { severityLabel } from '../core/audit.js';
 import { t } from '../core/i18n.js';
 
@@ -11,12 +11,15 @@ export interface DependencyTreeElement {
   parent?: DependencyTreeElement;
 }
 
-export class DependencyTreeProvider extends SnapshotTreeProvider<DependencyTreeElement> {
+export type DependencyViewElement = DependencyTreeElement | StatusNode;
+
+export class DependencyTreeProvider extends SnapshotTreeProvider<DependencyViewElement> {
   constructor(private readonly controller: ProjectController) {
     super();
   }
 
-  getTreeItem(element: DependencyTreeElement): vscode.TreeItem {
+  getTreeItem(element: DependencyViewElement): vscode.TreeItem {
+    if (isStatusNode(element)) return statusTreeItem(element);
     const { node } = element;
     const collapsible = node.children?.length
       ? vscode.TreeItemCollapsibleState.Expanded
@@ -45,13 +48,26 @@ export class DependencyTreeProvider extends SnapshotTreeProvider<DependencyTreeE
     return item;
   }
 
-  getChildren(element?: DependencyTreeElement): DependencyTreeElement[] {
-    const tree = this.controller.snapshot?.depTree;
-    if (!tree) return [];
+  getChildren(element?: DependencyViewElement): DependencyViewElement[] {
+    if (element && isStatusNode(element)) return [];
 
+    const tree = this.controller.snapshot?.depTree;
+    const phase = this.controller.phase;
     if (!element) {
+      if (!tree) {
+        if (phase === 'loading') return [{ status: 'loading', label: t('Loading dependencies…') }];
+        if (phase === 'error') {
+          return [errorStatus(t('Could not load dependencies.'), this.controller.errors.join('\n') || undefined)];
+        }
+        return [];
+      }
       // Root: the workspace node, or the single member's dependencies.
-      return [this.wrap(tree.root)];
+      const root = this.wrap(tree.root);
+      if (phase === 'loading') return [{ status: 'loading', label: t('Refreshing dependencies…') }, root];
+      if (phase === 'error') {
+        return [errorStatus(t('Could not load dependencies.'), this.controller.errors.join('\n') || undefined), root];
+      }
+      return [root];
     }
 
     const children = element.node.children ?? [];
@@ -154,7 +170,23 @@ export class DependencyTreeProvider extends SnapshotTreeProvider<DependencyTreeE
     if (node.localTarget) parts.push('local');
     if (node.declaration?.kind !== 'path') parts.push('documentable');
     if (node.workspaceRootDependency) parts.push('workspaceRootDependency');
+    if (this.isPromotable(node)) parts.push('promotable');
     return parts.join(':');
+  }
+
+  /**
+   * A direct declaration in a workspace member can be promoted to
+   * `[workspace.dependencies]`, including a path dependency on another member.
+   * Entries that already inherit are not promotable.
+   */
+  private isPromotable(node: DependencyNode): boolean {
+    return (
+      (node.kind === 'dependency' || node.kind === 'localDependency') &&
+      !!node.declaration &&
+      node.declaration.kind !== 'workspace' &&
+      !node.workspaceRootDependency &&
+      this.controller.project?.kind === 'workspace'
+    );
   }
 
   private icon(node: DependencyNode): vscode.ThemeIcon {

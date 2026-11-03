@@ -248,7 +248,9 @@ export function renderInstall(data: InstallPanelData): HTMLElement {
           state!.table,
           (value) => {
             state!.table = value as DependencyTable;
+            if (state!.table === 'dev-dependencies') state!.optional = false;
             updateHint();
+            renderDrawer();
           },
         ),
       ),
@@ -298,16 +300,23 @@ export function renderInstall(data: InstallPanelData): HTMLElement {
     }
 
     const options = el('div', { class: 'card' });
-    options.appendChild(
-      switchRowLocal(
-        t('Optional dependency'),
-        t('Adds the dependency behind a feature of this crate.'),
-        state!.optional,
-        (checked) => {
-          state!.optional = checked;
-        },
-      ),
-    );
+    if (state!.table === 'dev-dependencies') {
+      // Cargo rejects `optional = true` in [dev-dependencies].
+      options.appendChild(
+        el('div', { class: 'field-desc' }, t('Cargo does not allow optional dev-dependencies.')),
+      );
+    } else {
+      options.appendChild(
+        switchRowLocal(
+          t('Optional dependency'),
+          t('Adds the dependency behind a feature of this crate.'),
+          state!.optional,
+          (checked) => {
+            state!.optional = checked;
+          },
+        ),
+      );
+    }
     options.appendChild(
       switchRowLocal(
         t('Disable default features'),

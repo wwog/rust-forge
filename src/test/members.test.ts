@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parse } from 'smol-toml';
-import { matchesMemberPattern, planMemberAddition, planMemberRemoval } from '../core/cargo/project.js';
+import {
+  isWorkspacePathExcluded,
+  matchesMemberPattern,
+  planMemberAddition,
+  planMemberRemoval,
+} from '../core/cargo/project.js';
 
 function workspaceOf(text: string): Record<string, any> {
   const parsed = parse(text) as { workspace?: Record<string, any> };
@@ -81,6 +86,32 @@ test('comments and surrounding formatting survive the rewrite', () => {
   assert.ok(plan.text.includes('members = ["crates/*"] # keep this glob'));
   assert.ok(plan.text.includes('resolver = "3"'));
   assert.deepEqual(workspaceOf(plan.text).exclude, ['crates/foo']);
+});
+
+test('exclude matches cargo: plain paths cover descendants, globs match only themselves', () => {
+  assert.equal(isWorkspacePathExcluded('crates/foo', ['crates']), true);
+  assert.equal(isWorkspacePathExcluded('crates/group/foo', ['crates/group']), true);
+  assert.equal(isWorkspacePathExcluded('crates/foo', ['crates/*']), true);
+  assert.equal(isWorkspacePathExcluded('crates/group/foo', ['crates/*']), false);
+  assert.equal(isWorkspacePathExcluded('tools/foo', ['crates']), false);
+});
+
+test('adding a member excluded only by a glob adds an explicit entry', () => {
+  const text = '[workspace]\nmembers = ["crates/*"]\nexclude = ["crates/*"]\n';
+  const plan = planMemberAddition(text, 'crates/foo');
+  assert.equal(plan.changed, true);
+  const ws = workspaceOf(plan.text);
+  assert.deepEqual(ws.members, ['crates/*', 'crates/foo']);
+  assert.deepEqual(ws.exclude, ['crates/*']);
+});
+
+test('adding a member under an ancestor exclude adds an explicit entry', () => {
+  const text = '[workspace]\nmembers = ["crates/*"]\nexclude = ["crates"]\n';
+  const plan = planMemberAddition(text, 'crates/foo');
+  assert.equal(plan.changed, true);
+  const ws = workspaceOf(plan.text);
+  assert.deepEqual(ws.members, ['crates/*', 'crates/foo']);
+  assert.deepEqual(ws.exclude, ['crates']);
 });
 
 test('matchesMemberPattern normalizes separators, ./ prefixes and trailing slashes', () => {
