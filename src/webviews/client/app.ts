@@ -17,6 +17,7 @@ import type {
   ConvertPanelData,
   InstallPanelData,
   PropertiesPanelData,
+  HealthPanelData,
 } from '../protocol.js';
 import { renderInstall, applySearchResults, applyCrateDetail, applyCrateDetailFailed } from './panels/install.js';
 import { renderUpgrade } from './panels/upgrade.js';
@@ -25,6 +26,7 @@ import { renderRustfmt } from './panels/rustfmt.js';
 import { renderStandardize } from './panels/standardize.js';
 import { renderConvert } from './panels/convert.js';
 import { renderWizard } from './panels/wizard.js';
+import { renderHealth } from './panels/health.js';
 import { registerI18n, t } from './i18n.js';
 import { send, setSender } from './bridge.js';
 
@@ -124,6 +126,9 @@ function render(data: PanelData): void {
       break;
     case 'wizard-panel':
       fragment.appendChild(renderWizard(data));
+      break;
+    case 'health-panel':
+      fragment.appendChild(renderHealth(data));
       break;
     default:
       break;
@@ -226,4 +231,5 @@ export type {
   ConvertPanelData,
   InstallRequestPayload,
   PropertyEditPayload,
+  HealthPanelData,
 };

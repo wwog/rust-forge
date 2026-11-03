@@ -8,6 +8,8 @@ export function renderRustfmt(data: RustfmtPanelData): HTMLElement {
   const edits = new Map<string, string | number | boolean | string[] | undefined>();
   const root = el('div');
   let scope = data.scope;
+  let activeMember = data.activeMember;
+  const members = data.members ?? [];
 
   root.appendChild(el('h1', {}, t('rustfmt configuration')));
   root.appendChild(
@@ -25,9 +27,24 @@ export function renderRustfmt(data: RustfmtPanelData): HTMLElement {
     scopeSection.appendChild(
       select(options, scope, (value) => {
         scope = value as 'workspace' | 'member';
-        send({ type: 'refresh' });
+        send({ type: 'refresh', scope });
       }),
     );
+    if (scope === 'member' && members.length) {
+      scopeSection.appendChild(
+        field(
+          t('Member'),
+          select(
+            members.map((member) => ({ value: member.name, label: member.name })),
+            activeMember,
+            (value) => {
+              activeMember = value;
+              send({ type: 'refresh', scope: 'member', member: value });
+            },
+          ),
+        ),
+      );
+    }
     scopeSection.appendChild(
       banner('info', el('div', {}, scope === 'workspace'
         ? t('This configuration affects the entire workspace.')
@@ -48,7 +65,7 @@ export function renderRustfmt(data: RustfmtPanelData): HTMLElement {
 
   root.appendChild(
     el('div', { class: 'row tight', style: 'margin:12px 0' },
-      button(t('Generate recommended config'), () => send({ type: 'generateRustfmt', scope }), { secondary: true, icon: 'file-add' }),
+      button(t('Generate recommended config'), () => send({ type: 'generateRustfmt', scope, member: activeMember }), { secondary: true, icon: 'file-add' }),
       data.filePath
         ? button(t('Open file'), () => send({ type: 'openFile', path: data.filePath! }), { secondary: true, icon: 'go-to-file' })
         : el('span'),
@@ -103,7 +120,12 @@ export function renderRustfmt(data: RustfmtPanelData): HTMLElement {
   foot.appendChild(el('div', { class: 'spacer' }));
   foot.appendChild(button(t('Cancel'), () => send({ type: 'close' }), { secondary: true }));
   foot.appendChild(button(t('Save'), () => {
-    send({ type: 'saveRustfmt', edits: [...edits.entries()].map(([key, value]) => ({ key, value })), scope });
+    send({
+      type: 'saveRustfmt',
+      edits: [...edits.entries()].map(([key, value]) => ({ key, value })),
+      scope,
+      member: activeMember,
+    });
   }, { icon: 'check' }));
   root.appendChild(foot);
 

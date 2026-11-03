@@ -97,8 +97,8 @@ export function parseDependencies(text: string, manifestPath: string): Dependenc
         const deps = (targetValue as Record<string, unknown>)[table];
         if (!deps || typeof deps !== 'object') continue;
         for (const [key, value] of Object.entries(deps as Record<string, unknown>)) {
-          const decl = declarationFromValue(key, value, table, editor, manifestPath);
-          if (decl) result.push({ ...decl, target: targetName });
+          const decl = declarationFromValue(key, value, table, editor, manifestPath, targetName);
+          if (decl) result.push(decl);
         }
       }
     }
@@ -113,8 +113,9 @@ function declarationFromValue(
   table: DependencyTable,
   editor: TomlEditor,
   manifestPath: string,
+  targetName?: string,
 ): DependencyDeclaration | undefined {
-  const line = findLine(editor, table, key);
+  const line = findLine(editor, declarationTablePath({ table, target: targetName }), key);
   if (typeof value === 'string') {
     return {
       key,
@@ -125,6 +126,7 @@ function declarationFromValue(
       features: [],
       rawValue: JSON.stringify(value),
       manifestPath,
+      target: targetName,
       line,
     };
   }
@@ -158,6 +160,7 @@ function declarationFromValue(
     optional,
     rawValue: JSON.stringify(obj),
     manifestPath,
+    target: targetName,
     line,
   };
 }

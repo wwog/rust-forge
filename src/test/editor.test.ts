@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { parse } from 'smol-toml';
 import { TomlEditor, applyEdits, parseDottedKey } from '../core/toml/editor.js';
 
 const base = `# Top level comment
@@ -158,4 +159,19 @@ description = "a # b" # real comment
 `;
   const ed = new TomlEditor(src);
   assert.equal(ed.getValue('package', 'description'), '"a # b"');
+});
+
+test('comments inside a multiline array do not truncate the value', () => {
+  const src = `authors = [
+  "Alice", # primary "contact" ] here
+  "Bob",
+]
+`;
+  const ed = new TomlEditor(src);
+  assert.equal(ed.getValue('', 'authors'), `[
+  "Alice", # primary "contact" ] here
+  "Bob",
+]`);
+  const out = ed.apply(ed.setKey('', 'authors', '["Alice", "Bob"]'));
+  assert.deepEqual((parse(out) as Record<string, unknown>).authors, ['Alice', 'Bob']);
 });

@@ -12,7 +12,7 @@ import type { DependencyDeclaration } from '../cargo/manifestDeps.js';
 import type { ProjectModel } from '../cargo/project.js';
 import { lockedVersion, type LockfileInfo } from '../cargo/lockfile.js';
 import type { Advisory } from '../audit.js';
-import type { CrateDetail } from './registry.js';
+import { latestStableVersion, type CrateDetail } from './registry.js';
 import { classifyUpgrade, type UpgradeAssessment } from './versions.js';
 
 export type DependencyNodeKind = 'workspace' | 'member' | 'dependency' | 'localDependency' | 'group';
@@ -210,7 +210,7 @@ function buildDependencyNode(ctx: NodeContext): DependencyNode | undefined {
   const crate = localMember ? undefined : ctx.registryData.get(decl.packageName);
 
   const requirement = decl.kind === 'workspace' ? workspaceRequirement(decl, ctx.workspaceDependencies) : decl.version;
-  const latest = crate ? latestStable(crate) : undefined;
+  const latest = crate ? latestStableVersion(crate) : undefined;
   const targetVersionInfo = crate?.versions.find((v) => v.num === latest);
   const lockedVersionInfo = crate?.versions.find((v) => v.num === locked);
   const defaultFeatureSetChanged = defaultFeaturesChanged(lockedVersionInfo, targetVersionInfo);
@@ -277,11 +277,6 @@ function descriptionFor(decl: DependencyDeclaration, locked: string | undefined,
 function workspaceRequirement(decl: DependencyDeclaration, workspaceDeps?: DependencyDeclaration[]): string | undefined {
   const match = workspaceDeps?.find((d) => d.packageName === decl.packageName || d.key === decl.packageName);
   return match?.version ?? '*';
-}
-
-function latestStable(detail: CrateDetail): string | undefined {
-  const stable = detail.versions.find((v) => /^\d+\.\d+\.\d+$/.test(v.num) && !v.yanked);
-  return stable?.num ?? detail.maxStableVersion ?? detail.maxVersion;
 }
 
 function defaultFeaturesChanged(

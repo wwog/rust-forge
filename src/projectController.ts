@@ -7,7 +7,7 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { CargoMetadata } from './core/cargo/types.js';
-import { buildModel, discoverProject, parseManifestFile, type ProjectModel } from './core/cargo/project.js';
+import { applyMetadataMembers, buildModel, discoverProject, parseManifestFile, type ProjectModel } from './core/cargo/project.js';
 import { readLockfile, type LockfileInfo } from './core/cargo/lockfile.js';
 import { readDependencies, readWorkspaceDependencies, type DependencyDeclaration } from './core/cargo/manifestDeps.js';
 import type { CrateDetail } from './core/deps/registry.js';
@@ -122,8 +122,9 @@ export class ProjectController implements vscode.Disposable {
     this.model = built.model;
 
     const metadataResult = await this.services.cargo.metadata(dir, { noDeps: true });
-    if (metadataResult.ok) {
+    if (metadataResult.ok && metadataResult.metadata) {
       this.metadata = metadataResult.metadata;
+      this.model = applyMetadataMembers(this.model, metadataResult.metadata);
     } else {
       this.metadata = undefined;
       errors.push(metadataResult.error === 'cargo-missing' ? 'cargo was not found on PATH' : `cargo metadata failed: ${truncate(metadataResult.error ?? '')}`);
@@ -253,7 +254,7 @@ export class ProjectController implements vscode.Disposable {
   /** Force a refetch of security advisories, bypassing the cache. */
   async refreshAudit(): Promise<void> {
     if (!this.model) return;
-    const result = await this.services.audit.run(this.model.root, true);
+    const result = await this.services.audit.run(this.model.root, true, { force: true });
     this.auditResult = result;
     if (this.depTree) {
       // Re-index advisories on existing nodes without rebuilding the tree.

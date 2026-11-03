@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { parse as parseToml } from 'smol-toml';
 import { fileExists, readTextFile } from './process.js';
-import { TomlEditor } from './toml/editor.js';
+import { TomlEditor, type TextEdit } from './toml/editor.js';
 
 export type RustfmtValueType = 'boolean' | 'number' | 'string' | 'enum' | 'array';
 
@@ -745,33 +745,55 @@ export function generateRustfmtToml(options: GenerateOptions = {}): string {
 
 /** Apply per-option edits to an existing rustfmt.toml (or generate one). */
 export function applyRustfmtEdits(existing: string | undefined, edits: RustfmtEdit[], language: 'en' | 'zh-cn' = 'en'): string {
-  const source = existing ?? generateRustfmtToml({ language });
+  return applyTopLevelOptionEdits(existing ?? generateRustfmtToml({ language }), edits);
+}
+
+/**
+ * Apply top-level option edits while preserving comments and ordering.
+ *
+ * New keys are appended as a single block on their own lines, so adding an
+ * option can never concatenate onto an existing value or a comment.
+ */
+export function applyTopLevelOptionEdits(source: string, edits: RustfmtEdit[]): string {
   const editor = new TomlEditor(source);
-  const collected = edits.map((edit) => {
+  const collected: TextEdit[] = [];
+  const added: string[] = [];
+
+  for (const edit of edits) {
     if (edit.value === undefined) {
-      return editor.removeKey('', edit.key);
+      collected.push(...editor.removeKey('', edit.key));
+      continue;
     }
     const value = formatRustfmtValue(edit.value);
     if (editor.hasKey('', edit.key)) {
-      return editor.setKey('', edit.key, value);
+      collected.push(...editor.setKey('', edit.key, value));
+    } else {
+      added.push(`${edit.key} = ${value}`);
     }
-    // Top-level rustfmt options are bare keys before any table.
+  }
+
+  if (added.length) {
     const insertAt = topLevelInsertPoint(editor);
-    return [{ start: insertAt, end: insertAt, text: `${edit.key} = ${value}${editor.eol}` }];
-  });
-  const flat = collected.flat();
-  if (!flat.length) return source;
-  return editor.apply(flat);
+    const suffix = editor.text.slice(insertAt);
+    const prefix = insertAt > 0 ? editor.eol : '';
+    // Preserve the separator already present after the insertion point; add
+    // one when the file ends there or the next statement starts immediately.
+    const trailing = suffix.length === 0 || !/^[\r\n]/.test(suffix) ? editor.eol : '';
+    collected.push({
+      start: insertAt,
+      end: insertAt,
+      text: `${prefix}${added.join(editor.eol)}${trailing}`,
+    });
+  }
+
+  if (!collected.length) return source;
+  return editor.apply(collected);
 }
 
 function topLevelInsertPoint(editor: TomlEditor): number {
   const firstTable = editor.statements.find((s) => s.kind === 'table' || s.kind === 'arrayTable');
-  if (firstTable) {
-    const text = editor.text.slice(0, firstTable.start);
-    const trimmed = text.replace(/\s+$/, '');
-    return trimmed.length > 0 ? trimmed.length : 0;
-  }
-  return editor.text.endsWith('\n') ? editor.text.length : editor.text.length;
+  const end = firstTable ? firstTable.start : editor.text.length;
+  return editor.text.slice(0, end).replace(/\s+$/, '').length;
 }
 
 /** Options whose values differ from the generated defaults. */

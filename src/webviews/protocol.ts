@@ -2,8 +2,23 @@
 import type { StandardizeChangePreview, StandardizeFinding } from '../core/standardize.js';
 import type { InstallRequest } from '../core/deps/write.js';
 import type { DependencyTable } from '../core/cargo/types.js';
+import type { DuplicateGroup } from '../core/deps/duplicates.js';
+import type {
+  UnusedDependency,
+  VersionMismatch,
+  WorkspaceDependencyIssue,
+} from '../core/deps/health.js';
 
-export type PanelKind = 'install' | 'upgrade' | 'properties' | 'rustfmt' | 'standardize' | 'convert' | 'wizard' | 'audit';
+export type PanelKind =
+  | 'install'
+  | 'upgrade'
+  | 'properties'
+  | 'rustfmt'
+  | 'standardize'
+  | 'convert'
+  | 'wizard'
+  | 'audit'
+  | 'health';
 
 export interface DependencyRow {
   id: string;
@@ -29,6 +44,22 @@ export interface UpgradePanelData {
   rows: DependencyRow[];
   registryDegraded: boolean;
   workspace: boolean;
+}
+
+/** Dependency health: duplicates, unused declarations and workspace inheritance. */
+export interface HealthPanelData {
+  kind: 'health-panel';
+  workspace: boolean;
+  /** True while `cargo tree -d` is still running. */
+  analyzing: boolean;
+  duplicates: DuplicateGroup[];
+  unused: UnusedDependency[];
+  workspaceDependencies: WorkspaceDependencyIssue[];
+  versionMismatches: VersionMismatch[];
+  scannedFiles: number;
+  /** Set when duplicate analysis failed; declared checks still render. */
+  duplicateError?: string;
+  duplicateErrorDetail?: string;
 }
 
 export interface InstallPanelData {
@@ -112,6 +143,8 @@ export interface RustfmtPanelData {
   values: Record<string, string | number | boolean | string[]>;
   options: RustfmtOptionData[];
   memberScopeAvailable: boolean;
+  /** Every workspace member that can be targeted by the member scope. */
+  members: { name: string }[];
   activeMember?: string;
   warning?: string;
 }
@@ -170,7 +203,8 @@ export type PanelData =
   | RustfmtPanelData
   | StandardizePanelData
   | ConvertPanelData
-  | WizardPanelData;
+  | WizardPanelData
+  | HealthPanelData;
 
 export interface Toast {
   type: 'toast';
@@ -241,15 +275,22 @@ export type WebviewMessage =
   | { type: 'upgradeSelected'; ids: string[] }
   | { type: 'upgradeAllSafe' }
   | { type: 'saveProperties'; edits: PropertyEditPayload[] }
-  | { type: 'saveRustfmt'; edits: { key: string; value: string | number | boolean | string[] | undefined }[]; scope: 'workspace' | 'member' }
-  | { type: 'generateRustfmt'; scope: 'workspace' | 'member' }
+  | {
+      type: 'saveRustfmt';
+      edits: { key: string; value: string | number | boolean | string[] | undefined }[];
+      scope: 'workspace' | 'member';
+      /** Target member when `scope` is `member`; omitted means the active one. */
+      member?: string;
+    }
+  | { type: 'generateRustfmt'; scope: 'workspace' | 'member'; member?: string }
   | { type: 'applyStandardization'; ids: string[] }
   | { type: 'previewStandardization'; ids: string[] }
+  | { type: 'refreshHealth' }
   | { type: 'convert'; options: { extractFields: string[]; readmeHandling: 'keep' | 'copy'; targetDirName?: string } }
   | { type: 'cancel' }
-  | { type: 'openFile'; path: string }
+  | { type: 'openFile'; path: string; line?: number }
   | { type: 'openUrl'; url: string }
-  | { type: 'refresh' }
+  | { type: 'refresh'; scope?: 'workspace' | 'member'; member?: string }
   | { type: 'runCommand'; command: string; args?: unknown[] }
   | { type: 'close' };
 

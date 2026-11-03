@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { latestStableVersion } from '../core/deps/registry.js';
 import { classifyUpgrade, parseVersionReq, rewriteRequirement, requirementSatisfied, isCargoCompatible } from '../core/deps/versions.js';
 
 test('bare Cargo versions are caret requirements', () => {
@@ -74,4 +75,47 @@ test('an unrestricted requirement is upgraded to a caret on the target', () => {
   const patch = classifyUpgrade({ declared: '*', locked: '2.0.0', latest: '2.0.1' });
   assert.equal(patch.classification, 'safe');
   assert.equal(patch.newRequirement, '^2.0.1');
+});
+
+test('latest stable tolerates crates.io backfilled version ordering', () => {
+  const versions = ['0.1.1', '0.2.3', '0.3.2', '0.4.3', '0.10.1'].map((num) => ({
+    num,
+    yanked: false,
+    features: {},
+  }));
+  assert.equal(
+    latestStableVersion({ maxVersion: '0.10.1', maxStableVersion: '0.10.1', versions }),
+    '0.10.1',
+  );
+});
+
+test('latest stable keeps build metadata and ignores prereleases', () => {
+  const versions = ['1.1.8+spec-1.1.0', '1.1.7+spec-1.1.0', '0.9.8', '2.0.0-beta.1'].map((num) => ({
+    num,
+    yanked: false,
+    features: {},
+  }));
+  assert.equal(
+    latestStableVersion({ maxVersion: '2.0.0-beta.1', maxStableVersion: '1.1.8+spec-1.1.0', versions }),
+    '1.1.8+spec-1.1.0',
+  );
+});
+
+test('latest stable skips yanked versions and falls back to maxVersion', () => {
+  const versions = [
+    { num: '1.9.0', yanked: false, features: {} },
+    { num: '2.0.0', yanked: true, features: {} },
+    { num: '1.10.0', yanked: false, features: {} },
+  ];
+  assert.equal(
+    latestStableVersion({ maxVersion: '2.0.0', maxStableVersion: '2.0.0', versions }),
+    '1.10.0',
+  );
+  assert.equal(
+    latestStableVersion({
+      maxVersion: '0.5.0-alpha.1',
+      versions: [{ num: '0.5.0-alpha.1', yanked: false, features: {} }],
+    }),
+    '0.5.0-alpha.1',
+  );
 });

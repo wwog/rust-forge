@@ -12,7 +12,6 @@ import { Services } from './services.js';
 import { ProjectTreeProvider } from './views/projectTree.js';
 import { DependencyTreeProvider, type DependencyTreeElement } from './views/dependencyTree.js';
 import { ToolchainTreeProvider } from './views/toolchainTree.js';
-import { SettingsTreeProvider } from './views/settingsTree.js';
 import { openFile } from './views/shared.js';
 import { t } from './core/i18n.js';
 import { createProjectWizard, openProjectWizard, addWorkspaceMember, removeWorkspaceMember } from './commands/project.js';
@@ -39,7 +38,11 @@ import { editRustfmtCommand } from './commands/rustfmt.js';
 import { standardizeCommand, runClippyCommand } from './commands/standardize.js';
 import { convertToWorkspaceCommand } from './commands/convert.js';
 import { updateToolchainCommand, installToolchainCommand, installRustupCommand } from './commands/toolchain.js';
+import { runCrateCommand, runTestsCommand } from './commands/run.js';
+import { dependencyHealthCommand } from './commands/health.js';
 import { getOutput, log } from './commands/shared.js';
+import { isInside } from './core/process.js';
+import { isProjectConfigFile } from './core/watch.js';
 
 export function activate(context: vscode.ExtensionContext): void {
   log(`Rust Forge activated (${context.extension.packageJSON.version as string})`);
@@ -50,7 +53,6 @@ export function activate(context: vscode.ExtensionContext): void {
   const projectTree = new ProjectTreeProvider(controller);
   const dependencyTree = new DependencyTreeProvider(controller);
   const toolchainTree = new ToolchainTreeProvider(controller);
-  const settingsTree = new SettingsTreeProvider();
 
   context.subscriptions.push(
     services,
@@ -66,10 +68,6 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.window.createTreeView('rustForge.toolchain', {
       treeDataProvider: toolchainTree,
-      showCollapseAll: false,
-    }),
-    vscode.window.createTreeView('rustForge.settings', {
-      treeDataProvider: settingsTree,
       showCollapseAll: false,
     }),
   );
@@ -106,6 +104,9 @@ export function activate(context: vscode.ExtensionContext): void {
   register('rustForge.files.revealInOS', (item?: unknown) => revealInOSCommand(projectTree, item));
   register('rustForge.files.openToSide', (item?: unknown) => openToSideCommand(projectTree, item));
   register('rustForge.files.refresh', () => refreshFilesCommand(projectTree));
+  register('rustForge.runTest', (item?: unknown) => runTestsCommand(controller, services, item));
+  register('rustForge.run', (item?: unknown) => runCrateCommand(controller, services, item));
+  register('rustForge.dependencyHealth', () => dependencyHealthCommand(controller, services, context.extensionUri));
   register('rustForge.addMember', () => addWorkspaceMember(controller, services));
   register('rustForge.removeMember', async (item?: unknown) => {
     const name =
@@ -197,15 +198,54 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
+  // The project model can change outside VS Code too: a terminal `cargo build`
+  // updates Cargo.lock, and rustup/rustfmt tools rewrite toolchain and format
+  // config. Watch the project configuration files and reload the model once the
+  // burst settles. Saves made inside VS Code also surface as change events here,
+  // so the old onDidSaveTextDocument handler would only duplicate the reload.
+  const CONFIG_REFRESH_DELAY_MS = 700;
+  let configRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  const cancelConfigRefresh = () => {
+    if (configRefreshTimer) clearTimeout(configRefreshTimer);
+    configRefreshTimer = undefined;
+  };
+  const scheduleConfigRefresh = (uri: vscode.Uri) => {
+    if (uri.scheme !== 'file') return;
+    if (!isProjectConfigFile(path.basename(uri.fsPath))) return;
+    const root = controller.project?.root;
+    if (!root || !isInside(root, uri.fsPath)) return;
+    cancelConfigRefresh();
+    configRefreshTimer = setTimeout(() => {
+      configRefreshTimer = undefined;
+      // Re-check: the project may have changed or closed while debouncing.
+      const currentRoot = controller.project?.root;
+      if (!currentRoot || !isInside(currentRoot, uri.fsPath)) return;
+      void controller.refresh().catch((error) => {
+        log(`Rust Forge: project refresh after external change failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }, CONFIG_REFRESH_DELAY_MS);
+  };
+
+  const configWatcherDisposables: vscode.Disposable[] = [];
+  for (const pattern of [
+    '**/Cargo.toml',
+    '**/Cargo.lock',
+    '**/rust-toolchain.toml',
+    '**/rust-toolchain',
+    '**/rustfmt.toml',
+    '**/.rustfmt.toml',
+  ]) {
+    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+    configWatcherDisposables.push(
+      watcher,
+      watcher.onDidCreate(scheduleConfigRefresh),
+      watcher.onDidChange(scheduleConfigRefresh),
+      watcher.onDidDelete(scheduleConfigRefresh),
+    );
+  }
   context.subscriptions.push(
-    vscode.workspace.onDidSaveTextDocument(async (document) => {
-      const active = controller.project;
-      if (!active) return;
-      if (path.basename(document.fileName) !== 'Cargo.toml') return;
-      // Debounce reloads triggered by our own writes.
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      await controller.refresh();
-    }),
+    ...configWatcherDisposables,
+    new vscode.Disposable(cancelConfigRefresh),
   );
 
   context.subscriptions.push(

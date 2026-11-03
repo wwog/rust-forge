@@ -1,4 +1,5 @@
 /** crates.io sparse-index HTTP client with in-memory caching and offline mode. */
+import * as semver from 'semver';
 import type * as vscode from 'vscode';
 
 export interface CrateSummary {
@@ -27,6 +28,35 @@ export interface CrateDetail extends CrateSummary {
   versions: CrateVersionInfo[];
 }
 
+/**
+ * Newest non-yanked stable release.
+ *
+ * crates.io does not guarantee that `versions` is ordered by SemVer (old
+ * releases are occasionally backfilled), and build metadata such as
+ * `1.1.8+spec-1.1.0` is still a stable release. Sort explicitly and only use
+ * prereleases when the crate has no stable release at all.
+ */
+export function latestStableVersion(
+  detail: Pick<CrateDetail, 'versions' | 'maxStableVersion' | 'maxVersion'>,
+): string | undefined {
+  const maxStable = detail.maxStableVersion;
+  if (maxStable && isStableVersion(maxStable) && detail.versions.some((version) => version.num === maxStable && !version.yanked)) {
+    return maxStable;
+  }
+  const stable = detail.versions
+    .filter((version) => !version.yanked && isStableVersion(version.num))
+    .map((version) => version.num)
+    .sort((a, b) => semver.rcompare(a, b));
+  if (stable.length) return stable[0];
+  if (maxStable && isStableVersion(maxStable)) return maxStable;
+  return detail.maxVersion;
+}
+
+function isStableVersion(version: string): boolean {
+  const parsed = semver.parse(version);
+  return !!parsed && parsed.prerelease.length === 0;
+}
+
 export interface RegistryClientOptions {
   offline?: boolean;
   timeoutMs?: number;
@@ -45,13 +75,15 @@ export class RegistryClient {
   private readonly cache = new Map<string, CacheEntry<unknown>>();
   private lastNetworkError?: string;
   private offline = false;
+  private lastFailureAt = 0;
+  private lastSuccessAt = 0;
 
   constructor(private readonly options: RegistryClientOptions = {}) {
     this.offline = !!options.offline;
   }
 
   get degraded(): boolean {
-    return this.offline;
+    return this.offline || this.lastFailureAt > this.lastSuccessAt;
   }
 
   get networkError(): string | undefined {
@@ -65,6 +97,13 @@ export class RegistryClient {
   /** Mark the client degraded after a failed request so the UI can explain why. */
   private degrade(error: string): void {
     this.lastNetworkError = error;
+    this.lastFailureAt = Date.now();
+  }
+
+  /** A response arrived (even 404), so the network is reachable again. */
+  private markHealthy(): void {
+    this.lastSuccessAt = Date.now();
+    this.lastNetworkError = undefined;
   }
 
   private async request<T>(url: string): Promise<T | undefined> {
@@ -75,22 +114,29 @@ export class RegistryClient {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 8000);
-      const response = await fetch(url, {
-        signal: controller.signal,
-        headers: {
-          Accept: 'application/json',
-          'User-Agent': this.options.userAgent ?? 'rust-forge-vscode (Cargo tooling)',
-        },
-      });
-      clearTimeout(timer);
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          signal: controller.signal,
+          headers: {
+            Accept: 'application/json',
+            'User-Agent': this.options.userAgent ?? 'rust-forge-vscode (Cargo tooling)',
+          },
+        });
+      } finally {
+        clearTimeout(timer);
+      }
       if (!response.ok) {
-        if (response.status === 404) return undefined;
+        if (response.status === 404) {
+          this.markHealthy();
+          return undefined;
+        }
         this.degrade(`HTTP ${response.status}`);
         return undefined;
       }
       const value = (await response.json()) as T;
+      this.markHealthy();
       this.cache.set(url, { value, expires: Date.now() + TTL_MS });
-      this.lastNetworkError = undefined;
       return value;
     } catch (err) {
       const message = (err as Error).name === 'AbortError' ? 'timeout' : (err as Error).message;
@@ -133,9 +179,7 @@ export class RegistryClient {
    */
   async latestVersion(name: string): Promise<string | undefined> {
     const detail = await this.crate(name);
-    if (!detail) return undefined;
-    const stable = detail.versions.find((v) => /^\d+\.\d+\.\d+$/.test(v.num));
-    return stable?.num ?? detail.maxStableVersion ?? detail.maxVersion;
+    return detail ? latestStableVersion(detail) : undefined;
   }
 }
 

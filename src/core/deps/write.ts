@@ -5,7 +5,7 @@
  * command layer decides when to flush and verify.
  */
 import { TomlEditor, formatKeyPath, quoteString } from '../toml/editor.js';
-import type { DependencyDeclaration } from '../cargo/manifestDeps.js';
+import { declarationTablePath, type DependencyDeclaration } from '../cargo/manifestDeps.js';
 import type { DependencyTable } from '../cargo/types.js';
 import { parse as parseToml } from 'smol-toml';
 
@@ -36,6 +36,7 @@ export interface UpgradeResult {
 export function planUpgrades(edits: UpgradeEdit[], texts: Map<string, string>): UpgradeResult {
   const files = new Map<string, string>();
   const updateSpecs: string[] = [];
+  const seenSpecs = new Set<string>();
   const byFile = new Map<string, UpgradeEdit[]>();
 
   for (const edit of edits) {
@@ -49,17 +50,27 @@ export function planUpgrades(edits: UpgradeEdit[], texts: Map<string, string>): 
     if (original === undefined) continue;
     const editor = new TomlEditor(original);
     const collected = [];
+    const seen = new Set<string>();
 
     for (const edit of fileEdits) {
-      const table = edit.declaration.tablePath ?? (edit.workspaceDependency ? 'workspace.dependencies' : edit.declaration.table);
+      // A workspace root dependency and a member inheriting it both resolve to
+      // the same root table/key; apply that declaration only once.
+      const table = edit.workspaceDependency ? 'workspace.dependencies' : declarationTablePath(edit.declaration);
       const key = edit.workspaceDependency ? edit.declaration.packageName : edit.declaration.key;
+      const signature = `${table}\u0000${key}`;
+      if (seen.has(signature)) continue;
+      seen.add(signature);
       if (!editor.hasKey(table, key)) continue;
 
       const currentValue = editor.getValue(table, key)!;
       const rewritten = rewriteVersionValue(currentValue, edit.newRequirement);
       if (rewritten === undefined) continue;
       collected.push(...editor.setKey(table, key, rewritten));
-      updateSpecs.push(`${edit.declaration.packageName}@${edit.targetVersion}`);
+      const spec = `${edit.declaration.packageName}@${edit.targetVersion}`;
+      if (!seenSpecs.has(spec)) {
+        seenSpecs.add(spec);
+        updateSpecs.push(spec);
+      }
     }
 
     if (collected.length) {
@@ -133,20 +144,49 @@ export function planInstall(request: InstallRequest): InstallPlan {
     if (rootText === undefined) {
       return { files, writtenTable: 'workspace.dependencies', notes: ['Workspace manifest not found.'] };
     }
+    const rootTarget = targets.find((target) => target.manifestPath === request.workspaceManifestPath);
+    const memberTargets = targets.filter((target) => target.manifestPath !== request.workspaceManifestPath);
+    const hasReferences = !!rootTarget || memberTargets.length > 0;
+
+    // `optional` is a per-member concept; Cargo rejects it in
+    // [workspace.dependencies]. Without a selected member there is nowhere to
+    // put it, so fail rather than silently dropping the user's choice.
+    if (!hasReferences && request.optional) {
+      return {
+        files,
+        writtenTable: 'workspace.dependencies',
+        notes: ['Select at least one member for an optional dependency.'],
+      };
+    }
+
     const rootEditor = new TomlEditor(rootText);
-    const rootEdits = rootEditor.setKey('workspace.dependencies', request.packageName, formatRegistryRequirement(versionValue));
+    const rootValue = formatRegistryRequirement(
+      versionValue,
+      hasReferences ? {} : { features: request.features, noDefaultFeatures: request.noDefaultFeatures },
+    );
+    const rootEdits = rootEditor.setKey('workspace.dependencies', request.packageName, rootValue);
+    if (rootTarget) {
+      // A workspace root package is a member too; it receives an inheritance
+      // stub in its own [dependencies] table.
+      rootEdits.push(
+        ...rootEditor.setKey(
+          request.table,
+          request.packageName,
+          workspaceReferenceValue(request.features, request.optional, request.noDefaultFeatures),
+        ),
+      );
+    }
     files.set(request.workspaceManifestPath, rootEditor.apply(rootEdits));
 
-    const inherited: string[] = [];
-    for (const target of targets) {
-      if (target.manifestPath === request.workspaceManifestPath) continue;
+    const inherited: string[] = rootTarget ? [rootTarget.name] : [];
+    for (const target of memberTargets) {
       const memberText = request.texts.get(target.manifestPath);
       if (memberText === undefined) {
         notes.push(`Manifest for ${target.name} was not found; skipped.`);
         continue;
       }
       const memberEditor = new TomlEditor(memberText);
-      const value = workspaceReferenceValue(request.features, request.optional);
+      const value = workspaceReferenceValue(request.features, request.optional, request.noDefaultFeatures);
       files.set(target.manifestPath, memberEditor.apply(memberEditor.setKey(request.table, request.packageName, value)));
       inherited.push(target.name);
     }
@@ -185,9 +225,26 @@ function dedupeTargets(targets: InstallTarget[]): InstallTarget[] {
   return result;
 }
 
-function formatRegistryRequirement(version: string): string {
-  if (version === '^latest' || version === 'latest' || version === '') return '"*"';
-  return quoteString(version);
+function formatRegistryRequirement(
+  version: string,
+  options: { features?: string[]; noDefaultFeatures?: boolean } = {},
+): string {
+  const versionText = version === '^latest' || version === 'latest' || version === '' ? '"*"' : quoteString(version);
+  const features = options.features ?? [];
+  if (!features.length && !options.noDefaultFeatures) return versionText;
+  const parts = [`version = ${versionText}`];
+  if (features.length) parts.push(`features = [${features.map(quoteString).join(', ')}]`);
+  if (options.noDefaultFeatures) parts.push('default-features = false');
+  return `{ ${parts.join(', ')} }`;
+}
+
+/** Resolve the panel's `^latest` sentinel once the newest version is known. */
+export function resolveRequestedRequirement(
+  versionReq: string | undefined,
+  latest: string | undefined,
+): string | undefined {
+  if (versionReq && versionReq !== '^latest' && versionReq !== 'latest') return versionReq;
+  return latest ? `^${latest}` : versionReq;
 }
 
 function formatDirectRequirement(request: InstallRequest): string {
@@ -205,10 +262,15 @@ function formatDirectRequirement(request: InstallRequest): string {
     : `{ ${parts.join(', ')} }`;
 }
 
-export function workspaceReferenceValue(features: string[] = [], optional = false): string {
+export function workspaceReferenceValue(
+  features: string[] = [],
+  optional = false,
+  noDefaultFeatures = false,
+): string {
   const parts: string[] = ['workspace = true'];
   if (features.length) parts.push(`features = [${features.map(quoteString).join(', ')}]`);
   if (optional) parts.push('optional = true');
+  if (noDefaultFeatures) parts.push('default-features = false');
   return `{ ${parts.join(', ')} }`;
 }
 

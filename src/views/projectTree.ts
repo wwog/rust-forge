@@ -10,6 +10,8 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ProjectController } from '../projectController.js';
 import type { ProjectModel } from '../core/cargo/project.js';
+import type { CargoPackage } from '../core/cargo/types.js';
+import { crateTargetContextSuffix, detectCrateTargets } from '../core/crateTarget.js';
 import { SnapshotTreeProvider, type FileTreeHost } from './shared.js';
 import {
   explorerSortOrder,
@@ -95,7 +97,7 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
     if (element.kind === 'root') {
       if (!element.resourceUri) return [];
       const entries = await this.listDirectory(element.resourceUri, this.hiddenRootNames());
-      return element.contextValue === 'workspaceRoot' ? [...this.memberNodes(), ...entries] : entries;
+      return element.contextValue?.startsWith('workspaceRoot') ? [...(await this.memberNodes()), ...entries] : entries;
     }
     return element.children ?? [];
   }
@@ -114,13 +116,13 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
     }
   }
 
-  private buildTopLevel(): ProjectNode[] {
+  private async buildTopLevel(): Promise<ProjectNode[]> {
     const project = this.controller.project;
     const root = this.rootUri;
     if (!root) return [];
 
     const snapshot = this.controller.snapshot;
-    const nodes: ProjectNode[] = [this.rootNode(root, project)];
+    const nodes: ProjectNode[] = [await this.rootNode(root, project)];
 
     if (project?.emptyWorkspaceShell) {
       nodes.push({
@@ -166,9 +168,13 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
     return nodes;
   }
 
-  private rootNode(root: vscode.Uri, project: ProjectModel | undefined): ProjectNode {
+  private async rootNode(root: vscode.Uri, project: ProjectModel | undefined): Promise<ProjectNode> {
     const uriKey = root.toString();
     if (project?.kind === 'workspace') {
+      const rootPackage = project.rootPackage;
+      const target = rootPackage
+        ? await detectCrateTargets(rootPackage.dir, { metadataPackage: this.metadataPackage(rootPackage.name) })
+        : undefined;
       return {
         kind: 'root',
         label: path.basename(project.root) || 'workspace',
@@ -179,13 +185,17 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
         ),
         tooltip: project.manifestPath,
         manifestPath: project.manifestPath,
+        memberName: rootPackage?.name,
         resourceUri: root,
         icon: 'root-folder',
-        contextValue: 'workspaceRoot',
+        contextValue: `workspaceRoot${crateTargetContextSuffix(target)}`,
         id: `root:${uriKey}`,
       };
     }
     if (project?.rootPackage) {
+      const target = await detectCrateTargets(project.rootPackage.dir, {
+        metadataPackage: this.metadataPackage(project.rootPackage.name),
+      });
       return {
         kind: 'root',
         label: project.rootPackage.name,
@@ -195,7 +205,7 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
         memberName: project.rootPackage.name,
         resourceUri: root,
         icon: 'package',
-        contextValue: 'rootPackage',
+        contextValue: `rootPackage${crateTargetContextSuffix(target)}`,
         id: `root:${uriKey}`,
       };
     }
@@ -211,24 +221,40 @@ export class ProjectTreeProvider extends SnapshotTreeProvider<ProjectNode> imple
   }
 
   /** Workspace members as expandable package nodes, ordered by package name. */
-  private memberNodes(): ProjectNode[] {
+  private async memberNodes(): Promise<ProjectNode[]> {
     const project = this.controller.project;
     if (!project || project.kind !== 'workspace') return [];
-    return sortEntries(
-      project.members.map((member) => ({ name: member.name, isDirectory: true, member })),
+    const sorted = sortEntries(
+      project.members
+        // The workspace root package is represented by the root node itself.
+        .filter((member) => path.resolve(member.dir) !== path.resolve(project.root))
+        .map((member) => ({ name: member.name, isDirectory: true, member })),
       explorerSortOrder(),
-    ).map(({ member }) => ({
-      kind: 'member' as const,
-      label: member.name,
-      description: vscode.workspace.asRelativePath(member.dir, false),
-      tooltip: member.manifestPath,
-      manifestPath: member.manifestPath,
-      memberName: member.name,
-      resourceUri: vscode.Uri.file(member.dir),
-      icon: 'package',
-      contextValue: 'member',
-      id: `member:${member.dir}`,
-    }));
+    );
+
+    const nodes: ProjectNode[] = [];
+    for (const { member } of sorted) {
+      const target = await detectCrateTargets(member.dir, { metadataPackage: this.metadataPackage(member.name) });
+      nodes.push({
+        kind: 'member',
+        label: member.name,
+        description: vscode.workspace.asRelativePath(member.dir, false),
+        tooltip: member.manifestPath,
+        manifestPath: member.manifestPath,
+        memberName: member.name,
+        resourceUri: vscode.Uri.file(member.dir),
+        icon: 'package',
+        contextValue: `member${crateTargetContextSuffix(target)}`,
+        id: `member:${member.dir}`,
+      });
+    }
+    return nodes;
+  }
+
+  /** `cargo metadata --no-deps` package for a workspace member, when loaded. */
+  private metadataPackage(name: string | undefined): CargoPackage | undefined {
+    if (!name) return undefined;
+    return this.controller.snapshot?.metadata?.packages.find((pkg) => pkg.name === name);
   }
 
   /**

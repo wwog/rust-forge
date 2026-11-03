@@ -1,7 +1,8 @@
 /**
  * Toolchain detection and MSRV comparison.
  *
- * Detection order is `rust-toolchain.toml` (or the legacy plain file), then
+ * Detection order is `rust-toolchain.toml` (or the legacy plain file, both
+ * searched from the project root upwards like rustup does), then
  * `rustup show active-toolchain`, then plain `rustc --version`.
  */
 import * as path from 'node:path';
@@ -41,7 +42,7 @@ export interface ToolchainState {
   rustupPath?: string;
   rustcVersion?: string;
   activeToolchain?: string;
-  activeSource?: 'rust-toolchain.toml' | 'rustup' | 'rustc';
+  activeSource?: 'rust-toolchain.toml' | 'rust-toolchain' | 'rustup' | 'rustc';
   toolchainFile?: ToolchainFileSpec;
   installed: InstalledToolchain[];
   updates: ChannelUpdate[];
@@ -57,9 +58,16 @@ export interface ToolchainOptions {
   rustupPath?: string;
   cargoPath?: string;
   timeoutMs?: number;
+  /** How long a `rustup check` result stays valid. Defaults to 12 minutes. */
+  updatesCacheMs?: number;
 }
 
+/** `rustup check` hits the network, so results are reused for a while. */
+const DEFAULT_UPDATES_CACHE_MS = 12 * 60 * 1000;
+
 export class ToolchainService {
+  private readonly updatesCache = new Map<string, { at: number; updates: ChannelUpdate[] }>();
+
   constructor(private readonly options: ToolchainOptions = {}) {}
 
   async rustup(): Promise<string | undefined> {
@@ -72,43 +80,55 @@ export class ToolchainService {
     return configured ? which(configured, augmentedPath()) : which('cargo', augmentedPath());
   }
 
+  async rustc(): Promise<string | undefined> {
+    return which('rustc', augmentedPath());
+  }
+
   private async rustupRun(args: string[], cwd: string): Promise<RunResult | undefined> {
     const rustup = await this.rustup();
     if (!rustup) return undefined;
     return run(rustup, args, { cwd, timeoutMs: this.options.timeoutMs ?? 60_000 });
   }
 
+  /**
+   * Find the toolchain override that applies to `root`.
+   *
+   * rustup walks from the current directory towards the filesystem root, and
+   * within a directory prefers `rust-toolchain.toml` over the legacy
+   * `rust-toolchain` file. The nearest file wins.
+   */
   async readToolchainFile(root: string): Promise<ToolchainFileSpec | undefined> {
-    const tomlFile = path.join(root, 'rust-toolchain.toml');
-    if (await fileExists(tomlFile)) {
-      try {
-        const data = parseToml(await readTextFile(tomlFile)) as Record<string, unknown>;
-        const tc = (data.toolchain ?? {}) as Record<string, unknown>;
-        const channel = typeof data.channel === 'string' ? data.channel : typeof tc.channel === 'string' ? tc.channel : undefined;
-        return {
-          path: tomlFile,
-          channel,
-          components: stringArray(typeof tc.components === 'string' ? [tc.components] : tc.components),
-          targets: stringArray(tc.targets),
-          profile: typeof tc.profile === 'string' ? tc.profile : undefined,
-        };
-      } catch {
-        return { path: tomlFile };
-      }
+    let dir = path.resolve(root);
+    for (;;) {
+      const tomlFile = path.join(dir, 'rust-toolchain.toml');
+      if (await fileExists(tomlFile)) return this.readToolchainSpec(tomlFile, true);
+      const legacyFile = path.join(dir, 'rust-toolchain');
+      if (await fileExists(legacyFile)) return this.readToolchainSpec(legacyFile, false);
+      const parent = path.dirname(dir);
+      if (parent === dir) return undefined;
+      dir = parent;
     }
-    const plain = path.join(root, 'rust-toolchain');
-    if (await fileExists(plain)) {
-      try {
-        const channel = (await readTextFile(plain)).trim().split('\n')[0]?.trim();
-        return { path: plain, channel: channel || undefined };
-      } catch {
-        return { path: plain };
-      }
-    }
-    return undefined;
   }
 
-  async detect(root: string, msrv?: string): Promise<ToolchainState> {
+  private async readToolchainSpec(file: string, tomlName: boolean): Promise<ToolchainFileSpec> {
+    let content: string;
+    try {
+      content = await readTextFile(file);
+    } catch {
+      return { path: file };
+    }
+
+    // The legacy `rust-toolchain` file may contain either a bare channel name
+    // or the same `[toolchain]` TOML as `rust-toolchain.toml`, so try TOML
+    // first for both names.
+    const spec = parseToolchainToml(content);
+    if (spec) return { path: file, ...spec };
+    if (tomlName) return { path: file };
+
+    return { path: file, channel: firstMeaningfulLine(content) };
+  }
+
+  async detect(root: string, msrv?: string, options: { refreshUpdates?: boolean } = {}): Promise<ToolchainState> {
     const state: ToolchainState = {
       installed: [],
       updates: [],
@@ -119,13 +139,14 @@ export class ToolchainService {
     state.cargoPath = await this.cargo();
     state.rustupPath = await this.rustup();
     state.toolchainFile = await this.readToolchainFile(root);
-    if (state.toolchainFile) state.activeSource = 'rust-toolchain.toml';
+    if (state.toolchainFile) {
+      state.activeSource = path.basename(state.toolchainFile.path) === 'rust-toolchain.toml' ? 'rust-toolchain.toml' : 'rust-toolchain';
+    }
 
-    if (state.cargoPath) {
-      const version = await run(state.cargoPath, ['--version'], { cwd: root, timeoutMs: 20_000 });
-      if (version.code === 0) {
-        state.rustcVersion = parseCargoVersion(version.stdout);
-      }
+    const rustc = await this.rustc();
+    if (rustc) {
+      const version = await run(rustc, ['--version'], { cwd: root, timeoutMs: 20_000 });
+      if (version.code === 0) state.rustcVersion = parseCargoVersion(version.stdout);
     }
 
     if (state.rustupPath) {
@@ -147,7 +168,7 @@ export class ToolchainService {
         state.installed = parseToolchainList(list.stdout, state.activeToolchain);
       }
 
-      state.updates = await this.checkUpdates(root);
+      state.updates = await this.checkUpdates(root, { refresh: options.refreshUpdates });
     } else if (state.rustcVersion && !state.activeSource) {
       state.activeSource = 'rustc';
     }
@@ -172,9 +193,21 @@ export class ToolchainService {
     return state;
   }
 
-  async checkUpdates(root: string): Promise<ChannelUpdate[]> {
+  /**
+   * Cached `rustup check` results. `refresh` bypasses the cache (used after an
+   * update/install) and failures fall back to the last known result instead of
+   * blanking the view.
+   */
+  async checkUpdates(root: string, options: { refresh?: boolean } = {}): Promise<ChannelUpdate[]> {
+    const key = path.resolve(root);
+    const cached = this.updatesCache.get(key);
+    const now = Date.now();
+    const ttl = this.options.updatesCacheMs ?? DEFAULT_UPDATES_CACHE_MS;
+    if (!options.refresh && cached && now - cached.at < ttl) return cached.updates;
+
     const result = await this.rustupRun(['check'], root);
-    if (!result || result.code !== 0) return [];
+    if (!result || result.code !== 0) return cached?.updates ?? [];
+
     const updates: ChannelUpdate[] = [];
     for (const line of result.stdout.split('\n')) {
       const trimmed = line.trim();
@@ -192,7 +225,17 @@ export class ToolchainService {
         detail,
       });
     }
+    this.updatesCache.set(key, { at: now, updates });
     return updates;
+  }
+
+  /** Drop cached `rustup check` results, e.g. after an update or install. */
+  invalidateUpdates(root?: string): void {
+    if (root === undefined) {
+      this.updatesCache.clear();
+      return;
+    }
+    this.updatesCache.delete(path.resolve(root));
   }
 
   async update(root: string, channel?: string): Promise<RunResult | undefined> {
@@ -259,4 +302,58 @@ export function channelIsNightly(channel: string | undefined): boolean {
 function stringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return value.filter((v): v is string => typeof v === 'string');
+}
+
+/**
+ * Parse a toolchain file body as TOML. Accepts both `[toolchain]` and a
+ * top-level `channel` (older files). Returns undefined when the body is not
+ * TOML or carries no toolchain fields, so callers can fall back to the legacy
+ * one-line format.
+ */
+function parseToolchainToml(content: string): Omit<ToolchainFileSpec, 'path'> | undefined {
+  let data: unknown;
+  try {
+    data = parseToml(content);
+  } catch {
+    return undefined;
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return undefined;
+
+  const root = data as Record<string, unknown>;
+  const toolchainTable = root.toolchain;
+  const hasToolchainTable =
+    !!toolchainTable && typeof toolchainTable === 'object' && !Array.isArray(toolchainTable);
+  const tc = hasToolchainTable ? (toolchainTable as Record<string, unknown>) : {};
+
+  const channel =
+    typeof tc.channel === 'string'
+      ? tc.channel
+      : typeof root.channel === 'string'
+        ? root.channel
+        : undefined;
+  const components = stringArray(typeof tc.components === 'string' ? [tc.components] : tc.components);
+  const targets = stringArray(tc.targets);
+  const profile = typeof tc.profile === 'string' ? tc.profile : undefined;
+
+  // Treat the body as TOML when it actually looks like a toolchain spec, so a
+  // legacy file such as `path = "/opt/rust"` is not misread as a channel name.
+  const looksLikeToml =
+    hasToolchainTable ||
+    'channel' in root ||
+    'path' in root ||
+    components !== undefined ||
+    targets !== undefined ||
+    profile !== undefined;
+  if (!looksLikeToml) return undefined;
+  return { channel, components, targets, profile };
+}
+
+/** First non-empty, non-comment line of a legacy `rust-toolchain` file. */
+function firstMeaningfulLine(content: string): string | undefined {
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    return trimmed;
+  }
+  return undefined;
 }

@@ -4,10 +4,9 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ProjectController } from '../projectController.js';
 import type { Services } from '../services.js';
-import { discoverProject, parseManifestFile, workspaceTable } from '../core/cargo/project.js';
+import { discoverProject, parseManifestFile, planMemberAddition, planMemberRemoval, workspaceTable } from '../core/cargo/project.js';
 import { readTextFile, writeTextFile, relativePath } from '../core/process.js';
 import { generateRustfmtToml } from '../core/rustfmt.js';
-import { TomlEditor } from '../core/toml/editor.js';
 import { t } from '../core/i18n.js';
 import { log, getOutput, writeFilesWithVerification } from './shared.js';
 
@@ -231,7 +230,10 @@ export async function addWorkspaceMember(controller: ProjectController, services
       void vscode.window.showErrorMessage(t('That directory has no Cargo.toml.'));
       return;
     }
-    await addMemberPattern(controller, services, relative);
+    const added = await addMemberPattern(controller, services, relative);
+    if (added) {
+      void vscode.window.showInformationMessage(t('Added {0} to the workspace.', path.basename(picked[0].fsPath)));
+    }
     return;
   }
 
@@ -251,48 +253,33 @@ export async function addWorkspaceMember(controller: ProjectController, services
     return;
   }
 
-  const members = readMembers(await readTextFile(model.manifestPath));
-  if (!members.some((m) => m.includes('*'))) {
-    await addMemberPattern(controller, services, `crates/${name.trim()}`);
-  } else {
-    await controller.refresh();
-  }
-  void vscode.window.showInformationMessage(t('Added {0} to the workspace.', name.trim()));
-}
-
-function readMembers(manifestText: string): string[] {
-  try {
-    const parsed = JSON.parse(JSON.stringify(require('smol-toml').parse(manifestText))) as Record<string, unknown>;
-    const ws = workspaceTable(parsed);
-    return Array.isArray(ws?.members) ? (ws!.members as string[]) : [];
-  } catch {
-    return [];
+  const added = await addMemberPattern(controller, services, `crates/${name.trim()}`);
+  if (added) {
+    void vscode.window.showInformationMessage(t('Added {0} to the workspace.', name.trim()));
   }
 }
 
-async function addMemberPattern(controller: ProjectController, services: Services, memberPattern: string): Promise<void> {
+async function addMemberPattern(controller: ProjectController, services: Services, memberPattern: string): Promise<boolean> {
   const model = controller.project!;
   const original = await readTextFile(model.manifestPath);
-  const editor = new TomlEditor(original);
-  const members = readMembers(original);
-  if (members.includes(memberPattern)) {
+  const plan = planMemberAddition(original, memberPattern);
+  if (!plan.changed) {
+    // Already covered by members or an equivalent glob.
     await controller.refresh();
-    return;
+    return true;
   }
-  const updated = [...members, memberPattern];
-  const value = `[${updated.map((m) => JSON.stringify(m)).join(', ')}]`;
-  const newText = editor.apply(editor.setKey('workspace', 'members', value));
 
   const result = await writeFilesWithVerification({
     root: model.root,
-    files: new Map([[model.manifestPath, newText]]),
+    files: new Map([[model.manifestPath, plan.text]]),
     cargo: services.cargo,
     verify: { metadata: true, check: false, workspace: true },
   });
 
-  if (!result.ok) return;
+  if (!result.ok) return false;
   await controller.refresh();
   await controller.syncContextKeys();
+  return true;
 }
 
 export async function removeWorkspaceMember(
@@ -303,10 +290,12 @@ export async function removeWorkspaceMember(
   const model = controller.project;
   if (!model || model.kind !== 'workspace') return;
 
-  const target = memberName ?? (await pickMember(model.members, t('Remove workspace member')));
+  // The root package of a workspace cannot be removed from the members list.
+  const candidates = model.members.filter((m) => path.resolve(m.dir) !== path.resolve(model.root));
+  const target = memberName ?? (await pickMember(candidates, t('Remove workspace member')));
   if (!target) return;
 
-  const member = model.members.find((m) => m.name === target);
+  const member = candidates.find((m) => m.name === target);
   if (!member) return;
 
   const confirm = await vscode.window.showWarningMessage(
@@ -318,16 +307,17 @@ export async function removeWorkspaceMember(
 
   const relative = relativePath(model.root, member.dir);
   const original = await readTextFile(model.manifestPath);
-  const members = readMembers(original);
-  const remaining = members.filter((m) => m !== relative && !(m.includes('*') && member.dir.includes(path.sep + 'crates' + path.sep)));
-
-  const editor = new TomlEditor(original);
-  const value = `[${remaining.map((m) => JSON.stringify(m)).join(', ')}]`;
-  const newText = editor.apply(editor.setKey('workspace', 'members', value));
+  const plan = planMemberRemoval(original, relative);
+  if (!plan.changed) {
+    void vscode.window.showWarningMessage(
+      t('This member is included automatically by Cargo or is not listed in workspace.members, so it cannot be removed with this action.'),
+    );
+    return;
+  }
 
   const result = await writeFilesWithVerification({
     root: model.root,
-    files: new Map([[model.manifestPath, newText]]),
+    files: new Map([[model.manifestPath, plan.text]]),
     cargo: services.cargo,
     verify: { metadata: true, workspace: true },
   });

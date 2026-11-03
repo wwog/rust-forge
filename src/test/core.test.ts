@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import test from 'node:test';
 import { parseDependencies, declarationTablePath } from '../core/cargo/manifestDeps.js';
 import { parse } from 'smol-toml';
-import { migrateLintsToWorkspace } from '../core/standardize.js';
+import { analyzeStandardization, migrateLintsToWorkspace } from '../core/standardize.js';
 import {
   applyPropertyEdits,
   validateProperty,
@@ -17,6 +17,7 @@ import { generateRustfmtToml, applyRustfmtEdits, unstableOptionsWithoutFlag, RUS
 import { planMigration, chooseResolver, evaluatePromotion } from '../core/migration/plan.js';
 import { TomlEditor } from '../core/toml/editor.js';
 import { crateDocsUrl } from '../core/deps/registry.js';
+import { planUpgrades } from '../core/deps/write.js';
 import { buildDependencyTree } from '../core/deps/tree.js';
 import type { ProjectModel } from '../core/cargo/project.js';
 
@@ -343,6 +344,151 @@ libc = "0.2"
   const editor = new TomlEditor(text);
   const updated = editor.apply(editor.removeKey(declarationTablePath(decl), decl.key, { dropEmptyTable: true }));
   assert.equal(updated.trim(), '');
+});
+
+test('new rustfmt options are inserted on separate lines', () => {
+  const updated = applyRustfmtEdits('# my settings\nmax_width = 90\n', [
+    { key: 'tab_spaces', value: 2 },
+    { key: 'hard_tabs', value: false },
+  ]);
+  const parsed = parse(updated) as Record<string, unknown>;
+  assert.equal(parsed.max_width, 90);
+  assert.equal(parsed.tab_spaces, 2);
+  assert.equal(parsed.hard_tabs, false);
+  assert.ok(updated.startsWith('# my settings\n'));
+});
+
+test('new rustfmt options are safe when the file starts with a table', () => {
+  const updated = applyRustfmtEdits('[unstable]\nwrap_comments = true\n', [{ key: 'tab_spaces', value: 2 }]);
+  const parsed = parse(updated) as Record<string, any>;
+  assert.equal(parsed.tab_spaces, 2);
+  assert.equal(parsed.unstable.wrap_comments, true);
+});
+
+test('target-specific upgrades rewrite only the target table', () => {
+  const manifestPath = '/tmp/target/Cargo.toml';
+  const text = `[dependencies]
+libc = "0.2.100"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.1"
+`;
+  const declarations = parseDependencies(text, manifestPath);
+  const target = declarations.find((decl) => decl.target === 'cfg(unix)');
+  assert.ok(target);
+  assert.equal(target!.line, 4);
+  const result = planUpgrades(
+    declarations.map((declaration) => ({
+      manifestPath,
+      declaration,
+      newRequirement: '^0.2.200',
+      targetVersion: '0.2.200',
+    })),
+    new Map([[manifestPath, text]]),
+  );
+  assert.equal(result.updateSpecs.length, 1);
+  const parsed = parse(result.files.get(manifestPath)!) as Record<string, any>;
+  assert.equal(parsed.dependencies.libc, '^0.2.200');
+  assert.equal(parsed.target['cfg(unix)'].dependencies.libc, '^0.2.200');
+});
+
+test('a target-only dependency is upgraded instead of silently skipped', () => {
+  const manifestPath = '/tmp/target-only/Cargo.toml';
+  const text = `[target.'cfg(windows)'.dependencies]
+winapi = "0.3"
+`;
+  const declaration = parseDependencies(text, manifestPath)[0];
+  const result = planUpgrades(
+    [{ manifestPath, declaration, newRequirement: '^0.3.10', targetVersion: '0.3.10' }],
+    new Map([[manifestPath, text]]),
+  );
+  const parsed = parse(result.files.get(manifestPath)!) as Record<string, any>;
+  assert.equal(parsed.target['cfg(windows)'].dependencies.winapi, '^0.3.10');
+});
+
+test('duplicate upgrades for the same workspace key are applied once', () => {
+  const manifestPath = '/tmp/ws/Cargo.toml';
+  const text = `[workspace.dependencies]
+serde = "1.0"
+`;
+  const declaration = {
+    key: 'serde',
+    packageName: 'serde',
+    table: 'dependencies' as const,
+    version: '1.0',
+    kind: 'registry' as const,
+    features: [],
+    rawValue: '"1.0"',
+    manifestPath,
+    line: 1,
+  };
+  const edit = {
+    manifestPath,
+    declaration,
+    newRequirement: '^1.0.200',
+    targetVersion: '1.0.200',
+    workspaceDependency: true,
+  };
+  const memberEdit = { ...edit, declaration: { ...declaration, tablePath: undefined } };
+  const result = planUpgrades([edit, memberEdit], new Map([[manifestPath, text]]));
+  assert.equal(result.updateSpecs.length, 1);
+  const parsed = parse(result.files.get(manifestPath)!) as Record<string, any>;
+  assert.equal(parsed.workspace.dependencies.serde, '^1.0.200');
+});
+
+test('standardization merges metadata into existing rustfmt and clippy files', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'rust-forge-std-'));
+  try {
+    const manifestPath = path.join(dir, 'Cargo.toml');
+    await fs.writeFile(
+      manifestPath,
+      `[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.rustfmt]
+max_width = 120
+
+[package.metadata.clippy]
+too-many-arguments-threshold = 10
+`,
+    );
+    const rustfmtPath = path.join(dir, 'rustfmt.toml');
+    await fs.writeFile(rustfmtPath, '# keep this\nedition = "2021"\n');
+    const clippyPath = path.join(dir, 'clippy.toml');
+    await fs.writeFile(clippyPath, 'avoid-breaking-exported-api = false\n');
+
+    const model = {
+      kind: 'package',
+      root: dir,
+      manifestPath,
+      members: [{ name: 'demo', dir, manifestPath }],
+      rootPackage: { name: 'demo', dir, manifestPath },
+      emptyWorkspaceShell: false,
+      hasLockfile: false,
+      rustfmtFile: rustfmtPath,
+    } as unknown as ProjectModel;
+
+    const plan = await analyzeStandardization(model);
+    const fmt = plan.findings.find((finding) => finding.kind === 'fmt-in-manifest');
+    const clippy = plan.findings.find((finding) => finding.kind === 'clippy-config-in-manifest');
+    assert.ok(fmt);
+    assert.ok(clippy);
+
+    const fmtContent = fmt!.changes.find((change) => change.path === rustfmtPath)!.content;
+    const fmtParsed = parse(fmtContent) as Record<string, unknown>;
+    assert.equal(fmtParsed.edition, '2021');
+    assert.equal(fmtParsed.max_width, 120);
+    assert.match(fmtContent, /# keep this/);
+
+    const clippyContent = clippy!.changes.find((change) => change.path === clippyPath)!.content;
+    const clippyParsed = parse(clippyContent) as Record<string, any>;
+    assert.equal(clippyParsed['avoid-breaking-exported-api'], false);
+    assert.equal(clippyParsed['too-many-arguments-threshold'], 10);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('workspace dependencies are pinned above members and split local/remote', () => {

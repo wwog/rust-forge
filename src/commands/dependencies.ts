@@ -7,8 +7,8 @@ import type { DependencyTable } from '../core/cargo/types.js';
 import { declarationTablePath, parseDependencies, readDependencies } from '../core/cargo/manifestDeps.js';
 import { readLockfile } from '../core/cargo/lockfile.js';
 import { parseVersionReq, requirementSatisfied } from '../core/deps/versions.js';
-import { crateDocsUrl, type CrateDetail } from '../core/deps/registry.js';
-import { checkLockBeforeInstall, planInstall, planUpgrades, workspaceReferenceValue, type InstallRequest, type UpgradeEdit } from '../core/deps/write.js';
+import { crateDocsUrl, latestStableVersion, type CrateDetail } from '../core/deps/registry.js';
+import { checkLockBeforeInstall, planInstall, planUpgrades, resolveRequestedRequirement, workspaceReferenceValue, type InstallRequest, type UpgradeEdit } from '../core/deps/write.js';
 import type { DependencyNode } from '../core/deps/tree.js';
 import { buildModel } from '../core/cargo/project.js';
 import { readTextFile } from '../core/process.js';
@@ -111,7 +111,7 @@ async function buildCrateDetail(
   detail: CrateDetail,
   memberName: string | undefined,
 ): Promise<CrateDetailData> {
-  const latest = latestOf(detail) ?? detail.maxVersion;
+  const latest = latestStableVersion(detail) ?? detail.maxVersion;
   const member = model.members.find((m) => m.name === memberName) ?? model.members[0];
   const memberText = member ? await readTextFile(member.manifestPath).catch(() => '') : '';
   const existing = memberText ? dependencyRequirement(memberText, detail.name) : undefined;
@@ -137,11 +137,6 @@ async function buildCrateDetail(
     lockState: lockCheck.state,
     lockMessage: lockCheck.message,
   };
-}
-
-function latestOf(detail: CrateDetail): string | undefined {
-  const stable = detail.versions.find((v) => /^\d+\.\d+\.\d+$/.test(v.num) && !v.yanked);
-  return stable?.num ?? detail.maxStableVersion ?? detail.maxVersion;
 }
 
 function dependencyRequirement(manifestText: string, name: string): string | undefined {
@@ -219,9 +214,23 @@ async function performInstall(
     if (!overwrite) return;
   }
 
+  let versionReq = request.versionReq;
+  if (!versionReq || versionReq === '^latest' || versionReq === 'latest') {
+    const latest = await services.registry.latestVersion(request.packageName);
+    versionReq = resolveRequestedRequirement(versionReq, latest);
+  }
+  if (!versionReq || versionReq === '^latest' || versionReq === 'latest') {
+    // Falling back to "*" would silently accept any future major release.
+    host.toast(
+      t('Could not determine the latest version. Choose a version explicitly or check the network connection.'),
+      'error',
+    );
+    return;
+  }
+
   const installRequest: InstallRequest = {
     packageName: request.packageName,
-    versionReq: request.versionReq,
+    versionReq,
     table: request.table,
     features: request.features ?? [],
     optional: request.optional,

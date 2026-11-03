@@ -3,7 +3,6 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { renderShell, WebviewPanelHost } from '../../webviews/host.js';
-import { SettingsTreeProvider } from '../../views/settingsTree.js';
 import { DependencyTreeProvider } from '../../views/dependencyTree.js';
 import { ProjectTreeProvider } from '../../views/projectTree.js';
 
@@ -49,6 +48,9 @@ export async function run(): Promise<void> {
       'rustForge.files.revealInOS',
       'rustForge.files.openToSide',
       'rustForge.files.refresh',
+      'rustForge.runTest',
+      'rustForge.run',
+      'rustForge.dependencyHealth',
     ]) {
       assert.ok(commands.includes(id), `${id} is not registered`);
     }
@@ -150,20 +152,10 @@ export async function run(): Promise<void> {
     assert.deepEqual(ids.sort(), [
       'rustForge.dependencies',
       'rustForge.project',
-      'rustForge.settings',
       'rustForge.toolchain',
     ]);
-    // The settings view is last, i.e. rendered at the bottom of the container.
-    assert.equal(pkg.contributes.views.rustForge.at(-1)?.id, 'rustForge.settings');
-  });
-
-  await test('settings view opens VS Code settings for this extension', async () => {
-    const provider = new SettingsTreeProvider();
-    const items = provider.getChildren();
-    assert.equal(items.length, 1);
-    const item = provider.getTreeItem(items[0]);
-    assert.equal(item.command?.command, 'workbench.action.openSettings');
-    assert.deepEqual(item.command?.arguments, ['@ext:rust-forge.rust-forge']);
+    // The toolchain view is the last one in the container.
+    assert.equal(pkg.contributes.views.rustForge.at(-1)?.id, 'rustForge.toolchain');
   });
 
   await test('files view refreshes without throwing', async () => {
@@ -261,6 +253,7 @@ export async function run(): Promise<void> {
     ['rustForge.editRustfmt', 1500],
     ['rustForge.standardize', 1500],
     ['rustForge.convertToWorkspace', 2000],
+    ['rustForge.dependencyHealth', 2500],
   ] as [string, number][]) {
     await test(`${command} opens without throwing`, async () => {
       await vscode.commands.executeCommand(command);

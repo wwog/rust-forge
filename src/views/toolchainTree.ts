@@ -61,7 +61,7 @@ export class ToolchainTreeProvider extends SnapshotTreeProvider<ToolchainNode> {
       nodes.push({
         kind: 'active',
         label: state.activeToolchain ?? `rustc ${state.rustcVersion}`,
-        description: state.rustcVersion ? `cargo ${state.rustcVersion}` : undefined,
+        description: state.activeToolchain && state.rustcVersion ? `rustc ${state.rustcVersion}` : undefined,
         tooltip: [
           `${t('Active toolchain')}: ${state.activeToolchain ?? '—'}`,
           state.rustcVersion ? `rustc ${state.rustcVersion}` : undefined,

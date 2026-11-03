@@ -4,10 +4,11 @@
  * live — everything else consumes `ProjectModel`.
  */
 import * as fs from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { parse as parseToml } from 'smol-toml';
 import { fileExists, findUp, readTextFile } from '../process.js';
-import { TomlEditor } from '../toml/editor.js';
+import { TomlEditor, type TextEdit } from '../toml/editor.js';
 import type { CargoMetadata, CargoPackage } from './types.js';
 
 export interface ManifestModule {
@@ -90,51 +91,259 @@ export function isEmptyWorkspaceShell(manifest: Record<string, unknown>): boolea
   return !hasMembers && !hasPackage && meaningfulKeys.length === 0;
 }
 
-/** Expand workspace member globs the way cargo does (single `*` segment). */
-export async function expandMembers(root: string, patterns: string[]): Promise<DiscoveredPackage[]> {
+/** Expand workspace member globs the way cargo does. */
+export async function expandMembers(
+  root: string,
+  patterns: string[],
+  excludePatterns: string[] = [],
+): Promise<DiscoveredPackage[]> {
   const result: DiscoveredPackage[] = [];
   const seen = new Set<string>();
+  const excludes = excludePatterns.map(normalizeMemberPattern).filter(Boolean);
+
+  const add = async (dir: string, fallbackName: string): Promise<void> => {
+    const relative = path.relative(root, dir);
+    if (excludes.some((pattern) => matchesMemberPattern(relative, pattern))) return;
+    const manifestPath = path.join(dir, 'Cargo.toml');
+    if (!(await fileExists(manifestPath))) return;
+    if (seen.has(manifestPath)) return;
+    seen.add(manifestPath);
+    const parsed = await parseManifestFile(manifestPath);
+    const name = parsed.data ? String(packageTable(parsed.data)?.name ?? fallbackName) : fallbackName;
+    result.push({ name, manifestPath, dir });
+  };
 
   for (const pattern of patterns) {
-    const normalized = pattern.replace(/\\/g, '/').replace(/\/+$/, '');
-    if (normalized.includes('*')) {
-      const segments = normalized.split('/');
-      const star = segments.findIndex((s) => s.includes('*'));
-      const base = segments.slice(0, star).join('/');
-      const rest = segments.slice(star + 1);
-      const prefix = segments[star].replace(/\*/g, '');
-      const dir = path.join(root, base);
-      let entries: string[] = [];
-      try {
-        entries = await fs.readdir(dir);
-      } catch {
-        continue;
-      }
-      for (const entry of entries) {
-        if (!entry.startsWith(prefix)) continue;
-        const candidateDir = path.join(dir, entry, ...rest);
-        const manifestPath = path.join(candidateDir, 'Cargo.toml');
-        if (await fileExists(manifestPath)) {
-          const parsed = await parseManifestFile(manifestPath);
-          const name = parsed.data ? String(packageTable(parsed.data)?.name ?? entry) : entry;
-          if (seen.has(manifestPath)) continue;
-          seen.add(manifestPath);
-          result.push({ name, manifestPath, dir: candidateDir });
-        }
-      }
-    } else {
-      const manifestPath = path.join(root, normalized, 'Cargo.toml');
-      if (await fileExists(manifestPath)) {
-        const parsed = await parseManifestFile(manifestPath);
-        const fallback = path.basename(path.join(root, normalized));
-        const name = parsed.data ? String(packageTable(parsed.data)?.name ?? fallback) : fallback;
-        if (seen.has(manifestPath)) continue;
-        seen.add(manifestPath);
-        result.push({ name, manifestPath, dir: path.join(root, normalized) });
-      }
+    const normalized = normalizeMemberPattern(pattern);
+    if (!normalized) continue;
+    if (!hasGlob(normalized)) {
+      const dir = path.join(root, normalized);
+      await add(dir, path.basename(dir));
+      continue;
+    }
+    for (const dir of await expandGlobDirs(normalized.split('/'), 0, root)) {
+      await add(dir, path.basename(dir));
     }
   }
   return result.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function normalizeMemberPattern(pattern: string): string {
+  return pattern.replace(/\\/g, '/').replace(/^\.\/+/, '').replace(/\/+$/, '');
+}
+
+function hasGlob(value: string): boolean {
+  return /[*?\[]/.test(value);
+}
+
+/** Directories matched by a member/exclude glob, walking every segment. */
+async function expandGlobDirs(segments: string[], index: number, current: string): Promise<string[]> {
+  if (index >= segments.length) return [current];
+  const segment = segments[index];
+  if (!segment || segment === '.') return expandGlobDirs(segments, index + 1, current);
+
+  if (segment === '**') {
+    const dirs = await expandGlobDirs(segments, index + 1, current);
+    for (const entry of await readDirectories(current)) {
+      dirs.push(...(await expandGlobDirs(segments, index, entry)));
+    }
+    return dirs;
+  }
+
+  if (!hasGlob(segment)) {
+    const next = path.join(current, segment);
+    return (await isDirectory(next)) ? expandGlobDirs(segments, index + 1, next) : [];
+  }
+
+  const matcher = globSegmentMatcher(segment);
+  const dirs: string[] = [];
+  for (const entry of await readDirectories(current)) {
+    if (!matcher(path.basename(entry))) continue;
+    dirs.push(...(await expandGlobDirs(segments, index + 1, entry)));
+  }
+  return dirs;
+}
+
+async function readDirectories(dir: string): Promise<string[]> {
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isDirectory()).map((entry) => path.join(dir, entry.name));
+  } catch {
+    return [];
+  }
+}
+
+async function isDirectory(dir: string): Promise<boolean> {
+  try {
+    return (await fs.stat(dir)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Match one path segment with `*`, `?` and `[...]` glob syntax. */
+function globSegmentMatcher(segment: string): (name: string) => boolean {
+  let source = '^';
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
+    if (ch === '*') {
+      source += '.*';
+    } else if (ch === '?') {
+      source += '.';
+    } else if (ch === '[') {
+      const close = segment.indexOf(']', i + 1);
+      if (close < 0) {
+        source += '\\[';
+      } else {
+        let body = segment.slice(i + 1, close);
+        if (body.startsWith('!')) body = `^${body.slice(1)}`;
+        source += `[${body.replace(/\\/g, '\\\\')}]`;
+        i = close;
+      }
+    } else {
+      source += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  source += '$';
+  try {
+    const regex = new RegExp(source);
+    return (name) => regex.test(name);
+  } catch {
+    return (name) => name === segment;
+  }
+}
+
+/**
+ * Does `relative` (a member directory) fall under `pattern` (a members/exclude
+ * entry, possibly a glob)? Both sides are normalized first so callers can pass
+ * native paths or cargo-style forward-slash patterns interchangeably.
+ */
+export function matchesMemberPattern(relative: string, pattern: string): boolean {
+  const parts = normalizeMemberPattern(relative).split('/').filter(Boolean);
+  const patternParts = normalizeMemberPattern(pattern).split('/').filter(Boolean);
+  return matchMemberSegments(patternParts, 0, parts, 0);
+}
+
+export interface MemberRemovalPlan {
+  changed: boolean;
+  text: string;
+  /** Set when the directory is not managed through `workspace.members`. */
+  reason?: 'not-listed';
+}
+
+function formatStringArray(values: string[]): string {
+  return `[${values.map((value) => JSON.stringify(value)).join(', ')}]`;
+}
+
+/**
+ * Plan the removal of one workspace member without touching disk.
+ *
+ * A glob entry such as `crates/*` must never be dropped: it still covers every
+ * other crate. Instead the removed directory is added to `workspace.exclude`.
+ * Directories that are neither explicit members nor matched by a glob are not
+ * managed by the members list at all (cargo includes them as path dependencies)
+ * and cannot be removed through this operation.
+ */
+export function planMemberRemoval(manifestText: string, relativeDir: string): MemberRemovalPlan {
+  let manifest: Record<string, unknown>;
+  try {
+    manifest = parseToml(manifestText) as Record<string, unknown>;
+  } catch {
+    return { changed: false, text: manifestText };
+  }
+
+  const ws = workspaceTable(manifest);
+  const members = stringArray(ws?.members);
+  const excludes = stringArray(ws?.exclude);
+  const relative = normalizeMemberPattern(relativeDir);
+  if (!relative) return { changed: false, text: manifestText, reason: 'not-listed' };
+
+  const explicitIndexes = new Set(
+    members.flatMap((member, index) => (normalizeMemberPattern(member) === relative ? [index] : [])),
+  );
+  const explicit = explicitIndexes.size > 0;
+  const coveredByGlob = members.some(
+    (member, index) => !explicitIndexes.has(index) && hasGlob(member) && matchesMemberPattern(relative, member),
+  );
+
+  if (!explicit && !coveredByGlob) {
+    return { changed: false, text: manifestText, reason: 'not-listed' };
+  }
+
+  const editor = new TomlEditor(manifestText);
+  // Dotted `workspace.members = [...]` definitions cannot be updated safely by
+  // the table editor, so leave those manifests alone rather than corrupt them.
+  if (!editor.hasTable('workspace')) return { changed: false, text: manifestText };
+
+  const edits: TextEdit[] = [];
+  if (explicit) {
+    const nextMembers = members.filter((_, index) => !explicitIndexes.has(index));
+    edits.push(...editor.setKey('workspace', 'members', formatStringArray(nextMembers)));
+  }
+  if (coveredByGlob) {
+    const alreadyExcluded = excludes.some((pattern) => normalizeMemberPattern(pattern) === relative);
+    if (!alreadyExcluded) {
+      edits.push(...editor.setKey('workspace', 'exclude', formatStringArray([...excludes, relative])));
+    }
+  }
+
+  return { changed: true, text: editor.apply(edits) };
+}
+
+/**
+ * Plan adding a workspace member.
+ *
+ * A directory already covered by a member glob needs no extra entry, and an
+ * exact `exclude` entry for it must be dropped so it actually becomes a member
+ * again after a previous removal.
+ */
+export function planMemberAddition(manifestText: string, memberPattern: string): MemberRemovalPlan {
+  let manifest: Record<string, unknown>;
+  try {
+    manifest = parseToml(manifestText) as Record<string, unknown>;
+  } catch {
+    return { changed: false, text: manifestText };
+  }
+
+  const ws = workspaceTable(manifest);
+  const members = stringArray(ws?.members);
+  const excludes = stringArray(ws?.exclude);
+  const target = normalizeMemberPattern(memberPattern);
+  if (!target) return { changed: false, text: manifestText };
+
+  const covered = members.some(
+    (member) => normalizeMemberPattern(member) === target || (hasGlob(member) && matchesMemberPattern(target, member)),
+  );
+  const nextExcludes = excludes.filter((pattern) => normalizeMemberPattern(pattern) !== target);
+
+  const editor = new TomlEditor(manifestText);
+  if (!editor.hasTable('workspace')) return { changed: false, text: manifestText };
+
+  const edits: TextEdit[] = [];
+  if (!covered) {
+    edits.push(...editor.setKey('workspace', 'members', formatStringArray([...members, memberPattern])));
+  }
+  if (nextExcludes.length !== excludes.length) {
+    edits.push(
+      ...(nextExcludes.length
+        ? editor.setKey('workspace', 'exclude', formatStringArray(nextExcludes))
+        : editor.removeKey('workspace', 'exclude')),
+    );
+  }
+  if (!edits.length) return { changed: false, text: manifestText };
+  return { changed: true, text: editor.apply(edits) };
+}
+
+function matchMemberSegments(pattern: string[], index: number, parts: string[], partIndex: number): boolean {
+  if (index === pattern.length) return partIndex === parts.length;
+  const segment = pattern[index];
+  if (segment === '**') {
+    if (matchMemberSegments(pattern, index + 1, parts, partIndex)) return true;
+    return partIndex < parts.length && matchMemberSegments(pattern, index, parts, partIndex + 1);
+  }
+  if (partIndex >= parts.length) return false;
+  const matches = hasGlob(segment) ? globSegmentMatcher(segment)(parts[partIndex]) : parts[partIndex] === segment;
+  return matches && matchMemberSegments(pattern, index + 1, parts, partIndex + 1);
 }
 
 /**
@@ -172,7 +381,7 @@ export async function discoverProject(
       const ws = ancestorParsed.data ? workspaceTable(ancestorParsed.data) : undefined;
       if (ws) {
         const root = path.dirname(ancestor);
-        const members = await expandMembers(root, stringArray(ws.members));
+        const members = await expandMembers(root, stringArray(ws.members), stringArray(ws.exclude));
         if (members.some((m) => path.resolve(m.manifestPath) === path.resolve(localManifest))) {
           const ancestorModel = await buildModel(root);
           return { memberOfWorkspace: root, model: ancestorModel.model, error: ancestorModel.error };
@@ -220,7 +429,19 @@ export async function buildModel(root: string): Promise<{ model?: ProjectModel; 
   }
 
   if (model.kind === 'workspace') {
-    const members = await expandMembers(root, stringArray(ws?.members));
+    const members = await expandMembers(root, stringArray(ws?.members), stringArray(ws?.exclude));
+    if (pkg) {
+      const rootPackage: DiscoveredPackage = {
+        name: String(pkg.name ?? path.basename(root)),
+        manifestPath,
+        dir: root,
+      };
+      model.rootPackage = rootPackage;
+      // Cargo treats a workspace root that also has [package] as a member.
+      if (!members.some((member) => path.resolve(member.manifestPath) === path.resolve(manifestPath))) {
+        members.unshift(rootPackage);
+      }
+    }
     model.members = members;
   } else if (pkg) {
     const name = String(pkg.name ?? path.basename(root));
@@ -231,6 +452,48 @@ export async function buildModel(root: string): Promise<{ model?: ProjectModel; 
   }
 
   return { model };
+}
+
+/**
+ * Replace manifest-glob membership with cargo's resolved `workspace_members`.
+ *
+ * Cargo also promotes path dependencies inside the workspace to members and
+ * applies `exclude`, which is hard to reproduce exactly. When metadata comes
+ * from the same workspace root, its membership is authoritative.
+ */
+export function applyMetadataMembers(model: ProjectModel, metadata: CargoMetadata): ProjectModel {
+  if (!samePath(metadata.workspace_root, model.root)) return model;
+
+  const byId = new Map(metadata.packages.map((pkg) => [pkg.id, pkg]));
+  const seen = new Set<string>();
+  const members: DiscoveredPackage[] = [];
+  for (const id of metadata.workspace_members) {
+    const pkg = byId.get(id);
+    if (!pkg) continue;
+    // Cargo canonicalizes paths (e.g. /tmp -> /private/tmp on macOS). Rebase
+    // its results onto the model root so every path in the model uses the same
+    // representation as the folder the user opened.
+    const manifestPath = path.join(model.root, path.relative(metadata.workspace_root, pkg.manifest_path));
+    const key = path.resolve(manifestPath);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    members.push({ name: pkg.name, manifestPath, dir: path.dirname(manifestPath) });
+  }
+  if (!members.length) return model;
+
+  members.sort((a, b) => a.name.localeCompare(b.name));
+  const rootPackage = members.find((member) => path.resolve(member.manifestPath) === path.resolve(model.manifestPath));
+  return { ...model, members, rootPackage: rootPackage ?? model.rootPackage };
+}
+
+/** Compare paths that may differ only by symlinks (e.g. /tmp on macOS). */
+function samePath(a: string, b: string): boolean {
+  if (path.resolve(a) === path.resolve(b)) return true;
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
 }
 
 function stringArray(value: unknown): string[] {

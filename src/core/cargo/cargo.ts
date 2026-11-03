@@ -9,6 +9,23 @@ export interface CargoServiceOptions {
   timeoutMs?: number;
 }
 
+/**
+ * Build `cargo update` arguments from `name@version` specs.
+ *
+ * A bare `name@version` is a package *selection* and fails when that exact
+ * version is not already in the lockfile; refreshing a lock-only upgrade needs
+ * `-p name --precise version`.
+ */
+export function updateArgs(specs: string[]): string[] {
+  const args = ['update'];
+  for (const spec of specs) {
+    const at = spec.lastIndexOf('@');
+    if (at > 0) args.push('-p', spec.slice(0, at), '--precise', spec.slice(at + 1));
+    else args.push(spec);
+  }
+  return args;
+}
+
 export class CargoService {
   private resolved?: string;
 
@@ -79,7 +96,7 @@ export class CargoService {
   }
 
   async update(cwd: string, specs: string[], overrides: Partial<RunOptions> = {}): Promise<RunResult> {
-    return this.exec(['update', ...specs], cwd, { timeoutMs: 600_000, ...overrides });
+    return this.exec(updateArgs(specs), cwd, { timeoutMs: 600_000, ...overrides });
   }
 
   async fmtCheck(cwd: string, overrides: Partial<RunOptions> = {}): Promise<RunResult> {
@@ -95,6 +112,13 @@ export class CargoService {
     if (opts.allTargets !== false) args.push('--all-targets');
     if (opts.workspace) args.push('--workspace');
     return this.exec(args, cwd, { timeoutMs: 600_000, ...overrides });
+  }
+
+  /** `cargo tree -d` with a machine-stable prefix and no de-duplication. */
+  async treeDuplicates(cwd: string, opts: { workspace?: boolean } = {}, overrides: Partial<RunOptions> = {}): Promise<RunResult> {
+    const args = ['tree', '--duplicates', '--prefix', 'depth', '--no-dedupe', '--charset', 'ascii'];
+    if (opts.workspace) args.push('--workspace');
+    return this.exec(args, cwd, { timeoutMs: 180_000, ...overrides });
   }
 
   async new(cwd: string, name: string, kind: 'bin' | 'lib', vcs: 'git' | 'none' = 'git'): Promise<RunResult> {

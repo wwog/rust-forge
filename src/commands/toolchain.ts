@@ -34,6 +34,8 @@ export async function updateToolchainCommand(
 
   if (result.code === 0) {
     void vscode.window.showInformationMessage(t('Toolchain updated.'));
+    // rustup check results are cached; force a fresh one for this root.
+    services.toolchain.invalidateUpdates(snapshot.model.root);
     await controller.refresh();
   } else {
     void vscode.window.showErrorMessage(t('rustup update failed. See the Rust Forge output.'));
@@ -93,6 +95,8 @@ export async function installToolchainCommand(
     if (writeFile === t('Create rust-toolchain.toml')) {
       await writeToolchainFile(snapshot.model.root, channel.trim(), componentsPick.map((c) => c.label));
     }
+    // rustup check results are cached; force a fresh one for this root.
+    services.toolchain.invalidateUpdates(snapshot.model.root);
     await controller.refresh();
   } else {
     void vscode.window.showErrorMessage(t('Toolchain installation failed. See the Rust Forge output.'));

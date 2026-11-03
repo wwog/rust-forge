@@ -707,7 +707,15 @@ function findTrailingComment(text: string, valueStart: number, end: number): num
       default:
         break;
     }
-    if (ch === '#') return i;
+    if (ch === '#') {
+      if (brace === 0 && bracket === 0) return i;
+      // Comments are allowed inside multiline arrays/tables; skip the rest of
+      // the line so a quote or bracket in the comment cannot corrupt the scan.
+      const newline = text.indexOf('\n', i);
+      if (newline < 0) return end;
+      i = newline;
+      continue;
+    }
     if (ch === '"') {
       if (text.startsWith('"""', i)) {
         mode = 'mlBasic';

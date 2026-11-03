@@ -19,6 +19,7 @@ import { parseVersionReq, requirementSatisfied } from '../core/deps/versions.js'
 import { applyConversion, planConversion, rollbackLatest } from '../core/migration/execute.js';
 import { SnapshotStore } from '../core/snapshot.js';
 import { readTextFile } from '../core/process.js';
+import { parseCargoTreeDuplicates } from '../core/deps/duplicates.js';
 
 const exec = promisify(execFile);
 const cargo = new CargoService({ timeoutMs: 300_000 });
@@ -218,6 +219,56 @@ test('conversion produces a resolving workspace and rollback restores the packag
 
     const reMeta = await cargo.metadata(root, { noDeps: true });
     assert.ok(reMeta.ok, 'restored manifest must resolve');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cargo tree -d is parsed into explained duplicate versions', { skip: process.env.RF_SKIP_CARGO_TESTS === '1' }, async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rust-forge-dup-'));
+  try {
+    const aDir = path.join(root, 'a');
+    const bDir = path.join(root, 'b');
+    await fs.mkdir(path.join(aDir, 'src'), { recursive: true });
+    await fs.mkdir(path.join(bDir, 'src'), { recursive: true });
+    await fs.writeFile(
+      path.join(root, 'Cargo.toml'),
+      '[workspace]\nmembers = ["a", "b"]\nresolver = "2"\n',
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(aDir, 'Cargo.toml'),
+      '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nrand = "0.7"\n',
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(bDir, 'Cargo.toml'),
+      '[package]\nname = "b"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nrand = "0.8"\n',
+      'utf8',
+    );
+    await fs.writeFile(path.join(aDir, 'src', 'lib.rs'), 'pub fn a() {}\n', 'utf8');
+    await fs.writeFile(path.join(bDir, 'src', 'lib.rs'), 'pub fn b() {}\n', 'utf8');
+
+    const tree = await cargo.treeDuplicates(root, { workspace: true });
+    assert.equal(tree.code, 0, tree.stderr);
+    const meta = await cargo.metadata(root, { noDeps: false });
+    assert.ok(meta.ok, meta.error ?? 'cargo metadata failed');
+
+    const groups = parseCargoTreeDuplicates(tree.stdout, {
+      members: [
+        { name: 'a', dir: aDir },
+        { name: 'b', dir: bDir },
+      ],
+      metadata: meta.metadata,
+    });
+    const rand = groups.find((group) => group.name === 'rand');
+    assert.ok(rand, 'rand duplicate is missing');
+    assert.equal(rand!.versions.length, 2);
+    assert.equal(rand!.incompatible, true);
+    assert.deepEqual(
+      new Set(rand!.requirements.map((requirement) => requirement.requirement)),
+      new Set(['^0.7', '^0.8']),
+    );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

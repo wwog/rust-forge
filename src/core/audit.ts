@@ -7,6 +7,7 @@
  *
  * Results are cached on disk so opening the view does not hammer the network.
  */
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -57,18 +58,19 @@ export class AuditService {
     return this.options.cacheDir ?? path.join(os.tmpdir(), 'rust-forge-audit');
   }
 
-  private cacheFile(root: string): string {
+  private cacheFile(root: string, fingerprint: string): string {
     const key = Buffer.from(root).toString('base64url').slice(0, 40);
-    return path.join(this.cacheDir(), `${key}.json`);
+    return path.join(this.cacheDir(), `${key}-${fingerprint}.json`);
   }
 
-  async run(root: string, cargoAudit: boolean): Promise<AuditResult> {
+  async run(root: string, cargoAudit: boolean, runOptions: { force?: boolean } = {}): Promise<AuditResult> {
     const lock = await readLockfile(root);
     if (!lock?.packages.length) {
       return { source: 'unavailable', advisories: [], byPackage: new Map(), error: 'no-lockfile', fetchedAt: Date.now() };
     }
 
-    const cached = await this.readCache(root);
+    const fingerprint = lockFingerprint(lock);
+    const cached = runOptions.force ? undefined : await this.readCache(root, fingerprint);
     if (cached) {
       return { source: 'cache', advisories: cached.advisories, byPackage: indexAdvisories(cached.advisories), fetchedAt: cached.fetchedAt };
     }
@@ -80,24 +82,24 @@ export class AuditService {
     if (cargoAudit) {
       const viaCargo = await this.tryCargoAudit(root);
       if (viaCargo) {
-        await this.writeCache(root, viaCargo.advisories);
+        await this.writeCache(root, fingerprint, viaCargo.advisories);
         return viaCargo;
       }
     }
 
     const viaOsv = await this.queryOsv(lock, root);
     if (viaOsv) {
-      await this.writeCache(root, viaOsv.advisories);
+      await this.writeCache(root, fingerprint, viaOsv.advisories);
       return viaOsv;
     }
 
     return { source: 'unavailable', advisories: [], byPackage: new Map(), error: 'network', fetchedAt: Date.now() };
   }
 
-  private async readCache(root: string): Promise<CacheShape | undefined> {
+  private async readCache(root: string, fingerprint: string): Promise<CacheShape | undefined> {
     const hours = this.options.cacheHours ?? 6;
     try {
-      const raw = await fs.readFile(this.cacheFile(root), 'utf8');
+      const raw = await fs.readFile(this.cacheFile(root, fingerprint), 'utf8');
       const parsed = JSON.parse(raw) as CacheShape;
       if (Date.now() - parsed.fetchedAt > hours * 3600_000) return undefined;
       return parsed;
@@ -106,11 +108,11 @@ export class AuditService {
     }
   }
 
-  private async writeCache(root: string, advisories: Advisory[]): Promise<void> {
+  private async writeCache(root: string, fingerprint: string, advisories: Advisory[]): Promise<void> {
     try {
       await fs.mkdir(this.cacheDir(), { recursive: true });
       const data: CacheShape = { fetchedAt: Date.now(), advisories };
-      await fs.writeFile(this.cacheFile(root), JSON.stringify(data), 'utf8');
+      await fs.writeFile(this.cacheFile(root, fingerprint), JSON.stringify(data), 'utf8');
     } catch {
       // Cache is best-effort.
     }
@@ -199,6 +201,18 @@ export class AuditService {
       return undefined;
     }
   }
+}
+
+/**
+ * Stable fingerprint of the resolved dependency set in a lockfile.
+ *
+ * Package order in Cargo.lock is not meaningful, so entries are sorted before
+ * hashing. Any version or source change produces a different fingerprint,
+ * which keeps cached advisories from leaking across lockfile updates.
+ */
+export function lockFingerprint(lock: LockfileInfo): string {
+  const entries = lock.packages.map((pkg) => `${pkg.name}@${pkg.version}@${pkg.source ?? ''}`).sort();
+  return createHash('sha256').update(entries.join('\n')).digest('hex').slice(0, 16);
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {

@@ -13,6 +13,7 @@ import {
   type RustfmtEdit,
 } from '../core/rustfmt.js';
 import { readTextFile } from '../core/process.js';
+import { resolveRustfmtTarget, type RustfmtScope } from '../core/rustfmtTarget.js';
 import { t } from '../core/i18n.js';
 import { writeFilesWithVerification, getOutput } from './shared.js';
 import { WebviewPanelHost } from '../webviews/host.js';
@@ -33,14 +34,17 @@ export async function editRustfmtCommand(
   }
 
   const model = snapshot.model;
-  let scope: 'workspace' | 'member' = memberName ? 'member' : 'workspace';
-  const member = model.members.find((m) => m.name === memberName) ?? model.members[0];
+  let scope: RustfmtScope = memberName ? 'member' : 'workspace';
+  // The member the panel edits in member scope. Resolved lazily so members
+  // loaded after the panel opens (or a renamed member) are honoured.
+  let activeMemberName: string | undefined = memberName;
 
-  const buildData = async (scopeOverride?: 'workspace' | 'member'): Promise<RustfmtPanelData> => {
+  const buildData = async (scopeOverride?: RustfmtScope, memberOverride?: string): Promise<RustfmtPanelData> => {
     const activeScope = scopeOverride ?? scope;
+    const target = resolveRustfmtTarget(model, activeScope, memberOverride ?? activeMemberName);
     const workspaceConfig = await readRustfmtConfig(model.root);
-    const memberConfig = member && activeScope === 'member' ? await readRustfmtConfig(member.dir) : undefined;
-    const active = activeScope === 'member' ? memberConfig : workspaceConfig;
+    const memberConfig = target.scope === 'member' && target.member ? await readRustfmtConfig(target.member.dir) : undefined;
+    const active = target.scope === 'member' ? memberConfig : workspaceConfig;
     const values = active?.values ?? {};
     const warnings = unstableOptionsWithoutFlag(values);
     const zh = vscode.env.language.toLowerCase().startsWith('zh');
@@ -49,7 +53,7 @@ export async function editRustfmtCommand(
       kind: 'rustfmt-panel',
       workspace: model.kind === 'workspace',
       scope: activeScope,
-      filePath: active?.path ?? path.join(activeScope === 'member' && member ? member.dir : model.root, 'rustfmt.toml'),
+      filePath: active?.path ?? path.join(target.dir, 'rustfmt.toml'),
       fileExists: !!active,
       values,
       options: RUSTFMT_OPTIONS.map((option) => ({
@@ -65,8 +69,9 @@ export async function editRustfmtCommand(
         max: option.max,
         category: option.category,
       })),
-      memberScopeAvailable: model.kind === 'workspace' && !!member,
-      activeMember: member?.name,
+      memberScopeAvailable: model.kind === 'workspace' && model.members.length > 0,
+      members: model.members.map((entry) => ({ name: entry.name })),
+      activeMember: target.member?.name,
       warning: warnings.length
         ? t('These unstable options have no effect on stable rustfmt: {0}', warnings.join(', '))
         : undefined,
@@ -85,18 +90,27 @@ export async function editRustfmtCommand(
       path.join(dir, '.rustfmt.toml'),
     ]),
     reload: async (current) =>
-      // Keep the scope the user picked inside the panel.
-      buildData(current?.kind === 'rustfmt-panel' ? current.scope : scope),
+      // Keep the scope and member the user picked inside the panel.
+      buildData(
+        current?.kind === 'rustfmt-panel' ? current.scope : scope,
+        current?.kind === 'rustfmt-panel' ? current.activeMember : activeMemberName,
+      ),
     handlers: async (message: WebviewMessage) => {
       if (message.type === 'saveRustfmt') {
-        await save(host, controller, services, message.edits, message.scope);
+        await save(host, controller, services, message.edits, message.scope, message.member);
       } else if (message.type === 'generateRustfmt') {
-        await generate(host, controller, services, message.scope);
+        await generate(host, controller, services, message.scope, message.member);
       } else if (message.type === 'openFile') {
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(message.path));
         await vscode.window.showTextDocument(doc, { preview: true });
       } else if (message.type === 'refresh') {
-        host.setData(await buildData());
+        // The dropdowns send the authoritative scope/member; never rebuild
+        // from the stale closure values.
+        if (message.scope) scope = message.scope;
+        if (message.member) activeMemberName = message.member;
+        const resolved = resolveRustfmtTarget(model, scope, activeMemberName);
+        if (resolved.member) activeMemberName = resolved.member.name;
+        host.setData(await buildData(scope, activeMemberName));
       }
     },
   });
@@ -106,12 +120,19 @@ export async function editRustfmtCommand(
     ctrl: ProjectController,
     svc: Services,
     edits: { key: string; value: string | number | boolean | string[] | undefined }[],
-    targetScope: 'workspace' | 'member',
+    targetScope: RustfmtScope,
+    memberName?: string,
   ): Promise<void> {
     const projectSnapshot = ctrl.snapshot;
     if (!projectSnapshot) return;
-    scope = targetScope;
-    const targetDir = targetScope === 'member' && member ? member.dir : projectSnapshot.model.root;
+    const target = resolveRustfmtTarget(projectSnapshot.model, targetScope, memberName ?? activeMemberName);
+    if (targetScope === 'member' && target.missingMember) {
+      panel.toast(t('No workspace member selected.'), 'error');
+      return;
+    }
+    scope = target.scope;
+    activeMemberName = target.member?.name;
+    const targetDir = target.dir;
     const existing = await readRustfmtConfig(targetDir);
     const file = existing?.path ?? path.join(targetDir, 'rustfmt.toml');
     const original = existing?.path ? await readTextFile(existing.path) : undefined;
@@ -154,7 +175,7 @@ export async function editRustfmtCommand(
     if (result.ok) {
       panel.toast(t('rustfmt.toml saved and cargo fmt --check passed.'), 'success');
       await ctrl.refresh();
-      panel.setData(await buildData(targetScope));
+      panel.setData(await buildData(target.scope, target.member?.name));
     } else if (result.report) {
       const failed = result.report.steps.find((s) => !s.ok);
       if (failed?.name.includes('fmt')) {
@@ -174,12 +195,19 @@ export async function editRustfmtCommand(
     panel: WebviewPanelHost,
     ctrl: ProjectController,
     svc: Services,
-    targetScope: 'workspace' | 'member',
+    targetScope: RustfmtScope,
+    memberName?: string,
   ): Promise<void> {
     const projectSnapshot = ctrl.snapshot;
     if (!projectSnapshot) return;
-    scope = targetScope;
-    const targetDir = targetScope === 'member' && member ? member.dir : projectSnapshot.model.root;
+    const target = resolveRustfmtTarget(projectSnapshot.model, targetScope, memberName ?? activeMemberName);
+    if (targetScope === 'member' && target.missingMember) {
+      panel.toast(t('No workspace member selected.'), 'error');
+      return;
+    }
+    scope = target.scope;
+    activeMemberName = target.member?.name;
+    const targetDir = target.dir;
     const existing = await readRustfmtConfig(targetDir);
     if (existing) {
       const replace = await vscode.window.showWarningMessage(
@@ -207,7 +235,7 @@ export async function editRustfmtCommand(
 
     if (result.ok) {
       panel.toast(t('Recommended rustfmt.toml created.'), 'success');
-      panel.setData(await buildData(targetScope));
+      panel.setData(await buildData(target.scope, target.member?.name));
       await ctrl.refresh();
     } else {
       panel.toast(t('cargo fmt --check reported differences; the file was written. See the output for details.'), 'warning');

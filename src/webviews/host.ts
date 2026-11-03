@@ -86,6 +86,10 @@ export class WebviewPanelHost implements vscode.Disposable {
           console.error('[Rust Forge webview]', message.message);
           return;
         }
+        if (message.type === 'close') {
+          this.panel.dispose();
+          return;
+        }
         try {
           await this.options.handlers(message);
         } catch (err) {
