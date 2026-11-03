@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AuditService } from './core/audit.js';
 import { CargoService } from './core/cargo/cargo.js';
+import { resolveCargoMirror } from './core/cargo/mirror.js';
 import { RegistryClient } from './core/deps/registry.js';
 import { SnapshotStore } from './core/snapshot.js';
 import { ToolchainService } from './core/toolchain.js';
@@ -22,6 +23,7 @@ export class Services implements vscode.Disposable {
       cargoPath: settings.cargoPath,
       offline: settings.offline,
       timeoutMs: 120_000,
+      mirrorIndex: resolveCargoMirror(settings.cargoMirror, settings.cargoMirrors).index,
     });
     this.registryClient = new RegistryClient({
       offline: settings.offline,
@@ -73,12 +75,14 @@ export class Services implements vscode.Disposable {
     return store;
   }
 
-  private reconfigure(): void {
+  /** Rebuild services after a Rust Forge setting changed. */
+  reconfigure(): void {
     const settings = readSettings();
     this.cargoService = new CargoService({
       cargoPath: settings.cargoPath,
       offline: settings.offline,
       timeoutMs: 120_000,
+      mirrorIndex: resolveCargoMirror(settings.cargoMirror, settings.cargoMirrors).index,
     });
     this.registryClient = new RegistryClient({
       offline: settings.offline,

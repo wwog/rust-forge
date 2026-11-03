@@ -1,7 +1,7 @@
 /** Dependency install and upgrade commands, including webview wiring. */
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import type { ProjectController, ProjectSnapshot } from '../projectController.js';
+import type { ProjectController } from '../projectController.js';
 import type { Services } from '../services.js';
 import type { DependencyTable } from '../core/cargo/types.js';
 import {
@@ -24,7 +24,7 @@ import {
   type InstallRequest,
   type UpgradeEdit,
 } from '../core/deps/write.js';
-import { changeModeFor, compareTargetMsrv, isSafeUpgradeEligible } from '../core/deps/upgradePlan.js';
+import { changeModeFor, compareTargetMsrv } from '../core/deps/upgradePlan.js';
 import type { DependencyNode } from '../core/deps/tree.js';
 import { buildModel } from '../core/cargo/project.js';
 import { readTextFile } from '../core/process.js';
@@ -330,9 +330,6 @@ export async function upgradeDependenciesCommand(
         case 'upgradeSelected':
           await applyUpgrades(controller, services, host, message.ids);
           break;
-        case 'upgradeAllSafe':
-          await applyAllSafe(controller, services, host);
-          break;
         case 'runCommand':
           await vscode.commands.executeCommand(message.command, ...(message.args ?? []));
           break;
@@ -344,73 +341,6 @@ export async function upgradeDependenciesCommand(
       }
     },
   });
-}
-
-/**
- * One-click "Upgrade all safe" command.
- *
- * Selects every row that is classified safe and not blocked by the active
- * toolchain's MSRV, then runs the exact same apply pipeline as the panel
- * (diffs, modal confirmation, write + verify + lockfile refresh).
- */
-export async function upgradeAllSafeCommand(
-  controller: ProjectController,
-  services: Services,
-  extensionUri: vscode.Uri,
-): Promise<void> {
-  // The parameter keeps the command signature aligned with the other
-  // commands; this path does not open a webview panel.
-  void extensionUri;
-  const snapshot = controller.snapshot;
-  if (!snapshot) {
-    void vscode.window.showInformationMessage(t('Open a Rust project first.'));
-    return;
-  }
-  const nodes = eligibleSafeNodes(snapshot);
-  if (!nodes.length) {
-    void vscode.window.showInformationMessage(t('No safe upgrades are available.'));
-    return;
-  }
-  await applyUpgradeNodes(controller, services, windowNotifier, nodes);
-}
-
-async function applyAllSafe(
-  controller: ProjectController,
-  services: Services,
-  host: WebviewPanelHost,
-): Promise<void> {
-  const snapshot = controller.snapshot;
-  if (!snapshot) return;
-  const nodes = eligibleSafeNodes(snapshot);
-  if (!nodes.length) {
-    host.toast(t('No safe upgrades are available.'), 'warning');
-    return;
-  }
-  await applyUpgradeNodes(controller, services, panelNotifier(host), nodes);
-}
-
-/** Safe rows the batch action may include; unknown MSRV stays eligible. */
-function eligibleSafeNodes(snapshot: ProjectSnapshot): DependencyNode[] {
-  const toolchainVersion = snapshot.toolchain.rustcVersion;
-  const result: DependencyNode[] = [];
-  // Walk the same tree the panel renders so workspace-table-only dependencies
-  // (which are not in `depTree.upgradable`) are included too.
-  const visit = (node: DependencyNode) => {
-    if (
-      (node.kind === 'dependency' || node.kind === 'localDependency') &&
-      node.upgrade &&
-      node.declaration &&
-      node.latestVersion
-    ) {
-      const msrv = compareTargetMsrv(node.targetRustVersion, toolchainVersion);
-      if (isSafeUpgradeEligible({ classification: node.upgrade.classification, msrvViolated: msrv.violated })) {
-        result.push(node);
-      }
-    }
-    for (const child of node.children ?? []) visit(child);
-  };
-  visit(snapshot.depTree.root);
-  return result;
 }
 
 function buildUpgradeRows(root: DependencyNode, toolchainVersion?: string): DependencyRow[] {
@@ -473,16 +403,6 @@ function panelNotifier(host: WebviewPanelHost): UpgradeNotifier {
     toast: (message, level) => host.toast(message, level),
   };
 }
-
-/** Fallback feedback for commands that run without a webview panel. */
-const windowNotifier: UpgradeNotifier = {
-  busy: () => {},
-  toast: (message, level) => {
-    if (level === 'error') void vscode.window.showErrorMessage(message);
-    else if (level === 'warning') void vscode.window.showWarningMessage(message);
-    else void vscode.window.showInformationMessage(message);
-  },
-};
 
 async function applyUpgrades(
   controller: ProjectController,

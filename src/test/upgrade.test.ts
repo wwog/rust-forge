@@ -11,7 +11,6 @@ import {
   changeModeFor,
   compareTargetMsrv,
   diffCrateFeatures,
-  isSafeUpgradeEligible,
 } from '../core/deps/upgradePlan.js';
 import { classifyUpgrade } from '../core/deps/versions.js';
 
@@ -178,13 +177,6 @@ test('new crate features never reclassify a safe minor bump', () => {
     latestFeatures: undefined,
   });
   assert.equal(assessment.classification, 'safe');
-});
-
-test('one-click eligibility excludes MSRV violations but allows unknown MSRV', () => {
-  assert.equal(isSafeUpgradeEligible({ classification: 'safe' }), true);
-  assert.equal(isSafeUpgradeEligible({ classification: 'safe', msrvViolated: true }), false);
-  assert.equal(isSafeUpgradeEligible({ classification: 'major' }), false);
-  assert.equal(isSafeUpgradeEligible({ classification: 'unknown' }), false);
 });
 
 test('a lock-only row at another target survives a manifest rewrite of the same package', () => {

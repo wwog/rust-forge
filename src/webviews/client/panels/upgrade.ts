@@ -75,9 +75,6 @@ export function renderUpgrade(data: UpgradePanelData): HTMLElement {
     selected.clear();
     render();
   }, { secondary: true }));
-  foot.appendChild(button(t('Upgrade all safe'), () => {
-    send({ type: 'upgradeAllSafe' });
-  }, { icon: 'arrow-up', disabled: !selectableSafe.length }));
   foot.appendChild(button(t('Apply selected'), () => {
     if (!selected.size) {
       return;

@@ -2,11 +2,17 @@
 import * as path from 'node:path';
 import { augmentedPath, run, which, type RunResult, type RunOptions } from '../process.js';
 import type { CargoMetadata } from './types.js';
+import { installMirrorArgs, mirrorConfigArgs } from './mirror.js';
 
 export interface CargoServiceOptions {
   cargoPath?: string;
   offline?: boolean;
   timeoutMs?: number;
+  /**
+   * Registry index used by cargo processes started by Rust Forge. Undefined
+   * means "leave Cargo's own configuration untouched".
+   */
+  mirrorIndex?: string;
 }
 
 /**
@@ -34,6 +40,11 @@ export class CargoService {
     return !!this.options.offline;
   }
 
+  /** Global `--config` arguments for the selected mirror (empty for official). */
+  mirrorArgs(): string[] {
+    return mirrorConfigArgs(this.options.mirrorIndex);
+  }
+
   /** Locate cargo once; the result is cached for the session. */
   async resolve(): Promise<string | undefined> {
     if (this.resolved) return this.resolved;
@@ -59,8 +70,12 @@ export class CargoService {
         missingBinary: true,
       };
     }
-    const offlineArgs = this.options.offline && !args.includes('--offline') ? ['--offline', ...args] : args;
-    return run(cargo, offlineArgs, {
+    const offlineArgs = this.options.offline && !args.includes('--offline') ? ['--offline'] : [];
+    // `install` ignores source replacement, so it gets an explicit index.
+    const effectiveArgs = installMirrorArgs(args, this.options.mirrorIndex);
+    // `--config` is a cargo global option, so it must precede the subcommand.
+    const allArgs = [...this.mirrorArgs(), ...offlineArgs, ...effectiveArgs];
+    return run(cargo, allArgs, {
       cwd,
       timeoutMs: overrides.timeoutMs ?? this.options.timeoutMs ?? 120_000,
       ...overrides,

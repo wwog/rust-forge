@@ -113,7 +113,9 @@ async function launchTerminal(
     return;
   }
 
-  const command = shellCommand(cargo, args);
+  // Apply the Rust Forge mirror to terminal runs too; `--config` is a cargo
+  // global option and must come before the subcommand.
+  const command = shellCommand(cargo, [...services.cargo.mirrorArgs(), ...args]);
   const key = `${keyPrefix}:${cwd}`;
   let entry = terminals.get(key);
   if (entry && (!vscode.window.terminals.includes(entry.terminal) || entry.terminal.exitStatus !== undefined)) {

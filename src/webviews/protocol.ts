@@ -336,7 +336,6 @@ export type WebviewMessage =
   | { type: 'selectCrate'; name: string; member?: string }
   | { type: 'install'; request: InstallRequestPayload }
   | { type: 'upgradeSelected'; ids: string[] }
-  | { type: 'upgradeAllSafe' }
   | { type: 'saveTopology'; defaultMembers: string[]; exclude: string[] }
   | { type: 'moveMember'; member: string }
   | { type: 'promoteWorkspaceDependency'; packageName: string; members?: string[] }

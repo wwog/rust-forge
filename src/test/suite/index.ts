@@ -33,7 +33,6 @@ export async function run(): Promise<void> {
       'rustForge.createProject',
       'rustForge.installDependency',
       'rustForge.upgradeDependencies',
-      'rustForge.upgradeAllSafe',
       'rustForge.workspaceTopology',
       'rustForge.moveMember',
       'rustForge.promoteDependencyToWorkspace',
@@ -56,6 +55,9 @@ export async function run(): Promise<void> {
       'rustForge.runTest',
       'rustForge.run',
       'rustForge.dependencyHealth',
+      'rustForge.selectCargoMirror',
+      'rustForge.addCargoMirror',
+      'rustForge.removeCargoMirror',
     ]) {
       assert.ok(commands.includes(id), `${id} is not registered`);
     }
@@ -185,6 +187,26 @@ export async function run(): Promise<void> {
     ]);
     // The toolchain view is the last one in the container.
     assert.equal(pkg.contributes.views.rustForge.at(-1)?.id, 'rustForge.toolchain');
+  });
+
+  await test('toolchain view exposes the cargo mirror selector', async () => {
+    const provider = new ToolchainTreeProvider({
+      phase: 'ready',
+      errors: [],
+      snapshot: {
+        toolchain: {
+          installed: [],
+          updates: [],
+          msrvRelation: 'unknown',
+        },
+      },
+    } as never);
+    const nodes = provider.getChildren() as never[];
+    const mirror = nodes.find((node) => (node as { contextValue?: string }).contextValue === 'cargoMirror');
+    assert.ok(mirror, 'cargo mirror node is missing');
+    const item = provider.getTreeItem(mirror);
+    assert.equal(item.contextValue, 'cargoMirror');
+    assert.equal(item.command?.command, 'rustForge.selectCargoMirror');
   });
 
   await test('files view refreshes without throwing', async () => {

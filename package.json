@@ -191,12 +191,6 @@
         "icon": "$(arrow-up)"
       },
       {
-        "command": "rustForge.upgradeAllSafe",
-        "title": "%command.upgradeAllSafe%",
-        "category": "Rust Forge",
-        "icon": "$(check-all)"
-      },
-      {
         "command": "rustForge.workspaceTopology",
         "title": "%command.workspaceTopology%",
         "category": "Rust Forge",
@@ -276,6 +270,23 @@
         "category": "Rust Forge"
       },
       {
+        "command": "rustForge.selectCargoMirror",
+        "title": "%command.selectCargoMirror%",
+        "category": "Rust Forge",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "rustForge.addCargoMirror",
+        "title": "%command.addCargoMirror%",
+        "category": "Rust Forge",
+        "icon": "$(add)"
+      },
+      {
+        "command": "rustForge.removeCargoMirror",
+        "title": "%command.removeCargoMirror%",
+        "category": "Rust Forge"
+      },
+      {
         "command": "rustForge.refreshAudit",
         "title": "%command.refreshAudit%",
         "category": "Rust Forge"
@@ -347,22 +358,17 @@
         {
           "command": "rustForge.upgradeDependencies",
           "when": "view == rustForge.dependencies && rustForge.hasProject",
-          "group": "navigation@3"
-        },
-        {
-          "command": "rustForge.upgradeAllSafe",
-          "when": "view == rustForge.dependencies && rustForge.hasProject",
           "group": "navigation@2"
         },
         {
           "command": "rustForge.refreshAudit",
           "when": "view == rustForge.dependencies && rustForge.hasProject",
-          "group": "navigation@5"
+          "group": "navigation@4"
         },
         {
           "command": "rustForge.dependencyHealth",
           "when": "view == rustForge.dependencies && rustForge.hasProject",
-          "group": "navigation@4"
+          "group": "navigation@3"
         },
         {
           "command": "rustForge.refresh",
@@ -378,6 +384,11 @@
           "command": "rustForge.installToolchain",
           "when": "view == rustForge.toolchain && rustForge.hasProject",
           "group": "navigation@2"
+        },
+        {
+          "command": "rustForge.selectCargoMirror",
+          "when": "view == rustForge.toolchain && rustForge.hasProject",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [
@@ -480,6 +491,21 @@
           "command": "rustForge.installDependency",
           "when": "view == rustForge.dependencies && viewItem == memberDeps",
           "group": "inline@1"
+        },
+        {
+          "command": "rustForge.selectCargoMirror",
+          "when": "view == rustForge.toolchain && viewItem == cargoMirror",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rustForge.addCargoMirror",
+          "when": "view == rustForge.toolchain && viewItem == cargoMirror",
+          "group": "navigation@2"
+        },
+        {
+          "command": "rustForge.removeCargoMirror",
+          "when": "view == rustForge.toolchain && viewItem == cargoMirror",
+          "group": "1_modification@1"
         }
       ],
       "commandPalette": [
@@ -542,6 +568,10 @@
         {
           "command": "rustForge.promoteDependencyToWorkspace",
           "when": "false"
+        },
+        {
+          "command": "rustForge.removeCargoMirror",
+          "when": "false"
         }
       ]
     },
@@ -588,6 +618,31 @@
           ],
           "default": "browser",
           "description": "%config.crateDocsOpenMode%"
+        },
+        "rustForge.cargoMirror": {
+          "type": "string",
+          "default": "official",
+          "description": "%config.cargoMirror%"
+        },
+        "rustForge.cargoMirrors": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "index"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "index": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "%config.cargoMirrors%"
         }
       }
     }

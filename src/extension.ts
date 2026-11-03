@@ -29,7 +29,6 @@ import {
 import {
   installDependencyCommand,
   upgradeDependenciesCommand,
-  upgradeAllSafeCommand,
   openCrateDocs,
   removeDependencyCommand,
   addWorkspaceDependencyToMemberCommand,
@@ -41,6 +40,11 @@ import { editRustfmtCommand } from './commands/rustfmt.js';
 import { standardizeCommand, runClippyCommand } from './commands/standardize.js';
 import { convertToWorkspaceCommand } from './commands/convert.js';
 import { updateToolchainCommand, installToolchainCommand, installRustupCommand } from './commands/toolchain.js';
+import {
+  selectCargoMirrorCommand,
+  addCargoMirrorCommand,
+  removeCargoMirrorCommand,
+} from './commands/mirror.js';
 import { runCrateCommand, runTestsCommand } from './commands/run.js';
 import { dependencyHealthCommand } from './commands/health.js';
 import { getOutput, log } from './commands/shared.js';
@@ -134,7 +138,6 @@ export function activate(context: vscode.ExtensionContext): void {
     await installDependencyCommand(controller, services, context.extensionUri, member);
   });
   register('rustForge.upgradeDependencies', () => upgradeDependenciesCommand(controller, services, context.extensionUri));
-  register('rustForge.upgradeAllSafe', () => upgradeAllSafeCommand(controller, services, context.extensionUri));
   register('rustForge.workspaceTopology', () => workspaceTopologyCommand(controller, services, context.extensionUri));
   register('rustForge.moveMember', async (item?: unknown) => {
     const name =
@@ -186,6 +189,9 @@ export function activate(context: vscode.ExtensionContext): void {
   register('rustForge.updateToolchain', async (channel?: unknown) =>
     updateToolchainCommand(controller, services, typeof channel === 'string' ? channel : undefined),
   );
+  register('rustForge.selectCargoMirror', () => selectCargoMirrorCommand(controller, services));
+  register('rustForge.addCargoMirror', () => addCargoMirrorCommand(controller, services));
+  register('rustForge.removeCargoMirror', () => removeCargoMirrorCommand(controller, services));
   register('rustForge.installToolchain', () => installToolchainCommand(controller, services));
   register('rustForge.installRustup', () => installRustupCommand(services));
   register('rustForge.refreshAudit', async () => {
@@ -277,7 +283,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (event) => {
-      if (event.affectsConfiguration('rustForge.offline') || event.affectsConfiguration('rustForge.cargoPath')) {
+      if (
+        event.affectsConfiguration('rustForge.offline') ||
+        event.affectsConfiguration('rustForge.cargoPath') ||
+        event.affectsConfiguration('rustForge.cargoMirror') ||
+        event.affectsConfiguration('rustForge.cargoMirrors')
+      ) {
         await controller.refresh();
       }
     }),

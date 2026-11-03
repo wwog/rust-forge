@@ -1,10 +1,22 @@
 /** Toolchain view: active channel, available updates and MSRV status. */
 import * as vscode from 'vscode';
 import type { ProjectController } from '../projectController.js';
+import { resolveCargoMirror } from '../core/cargo/mirror.js';
+import { readSettings } from '../settings.js';
 import { SnapshotTreeProvider } from './shared.js';
 import { t } from '../core/i18n.js';
 
-type ToolchainNodeKind = 'active' | 'msrv' | 'installed' | 'update' | 'group' | 'action' | 'component' | 'target' | 'status';
+type ToolchainNodeKind =
+  | 'active'
+  | 'msrv'
+  | 'installed'
+  | 'update'
+  | 'group'
+  | 'action'
+  | 'component'
+  | 'target'
+  | 'mirror'
+  | 'status';
 
 interface ToolchainNode {
   kind: ToolchainNodeKind;
@@ -93,6 +105,22 @@ export class ToolchainTreeProvider extends SnapshotTreeProvider<ToolchainNode> {
         ],
       });
     }
+
+    const settings = readSettings();
+    const mirror = resolveCargoMirror(settings.cargoMirror, settings.cargoMirrors);
+    nodes.push({
+      kind: 'mirror',
+      label: t('Cargo mirror'),
+      description: mirror.index ? mirror.name : t('Cargo default (no replacement)'),
+      tooltip: [
+        `${t('Mirror source')}: ${mirror.name}`,
+        mirror.index ?? t('Cargo default (no replacement)'),
+        t('Applies only to cargo processes started by Rust Forge.'),
+      ].join('\n'),
+      icon: 'globe',
+      contextValue: 'cargoMirror',
+      command: { command: 'rustForge.selectCargoMirror', title: t('Select Cargo Mirror…') },
+    });
 
     if (state.msrv) {
       const violated = state.msrvRelation === 'violated';

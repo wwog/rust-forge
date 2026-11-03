@@ -7,7 +7,7 @@
  */
 import * as semver from 'semver';
 import type { CrateVersionInfo } from './registry.js';
-import type { FeatureChange, UpgradeAssessment, UpgradeClass } from './versions.js';
+import type { FeatureChange, UpgradeAssessment } from './versions.js';
 
 /** How an upgrade is applied: rewrite the manifest, refresh Cargo.lock, or nothing. */
 export type ChangeMode = 'manifest' | 'lock-only' | 'none';
@@ -90,17 +90,4 @@ export function changeModeFor(
   if (upgrade.lockOnly) return 'lock-only';
   const after = upgrade.newRequirement ?? requirement;
   return after === requirement ? 'lock-only' : 'manifest';
-}
-
-export interface SafeUpgradeCandidate {
-  classification: UpgradeClass;
-  msrvViolated?: boolean;
-}
-
-/**
- * Rows a one-click batch may include: classified safe and not known to need a
- * newer compiler. An unknown MSRV stays eligible (it is shown, not hidden).
- */
-export function isSafeUpgradeEligible(candidate: SafeUpgradeCandidate): boolean {
-  return candidate.classification === 'safe' && !candidate.msrvViolated;
 }
